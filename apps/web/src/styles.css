@@ -1,0 +1,144 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* Tidepool palette: deep ink water, coral, sea glass. */
+:root,
+[data-theme='dark'] {
+  --tp-bg: #0b1220;
+  --tp-surface: #111b30;
+  --tp-surface-2: #182540;
+  --tp-raised: #1f2e4d;
+  --tp-line: #263656;
+  --tp-fg: #e8eef9;
+  --tp-muted: #93a3c0;
+  --tp-accent: #ff7a59;
+  --tp-accent-strong: #ff8f73;
+  --tp-on-accent: #1a0d08;
+  --tp-sea: #5ad1c6;
+  --tp-danger: #ff6b81;
+  color-scheme: dark;
+}
+
+[data-theme='light'] {
+  --tp-bg: #f5f7fb;
+  --tp-surface: #ffffff;
+  --tp-surface-2: #edf1f8;
+  --tp-raised: #e3e9f3;
+  --tp-line: #d5dcea;
+  --tp-fg: #0d1526;
+  --tp-muted: #55627a;
+  --tp-accent: #d9502f;
+  --tp-accent-strong: #c2441f;
+  --tp-on-accent: #ffffff;
+  --tp-sea: #127f76;
+  --tp-danger: #c4213b;
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-bg: var(--tp-bg);
+  --color-surface: var(--tp-surface);
+  --color-surface-2: var(--tp-surface-2);
+  --color-raised: var(--tp-raised);
+  --color-line: var(--tp-line);
+  --color-fg: var(--tp-fg);
+  --color-muted: var(--tp-muted);
+  --color-accent: var(--tp-accent);
+  --color-accent-strong: var(--tp-accent-strong);
+  --color-on-accent: var(--tp-on-accent);
+  --color-sea: var(--tp-sea);
+  --color-danger: var(--tp-danger);
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--tp-bg);
+  color: var(--tp-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Visible focus for keyboard users only. */
+:focus-visible {
+  outline: 2px solid var(--tp-sea);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* iPhone notch / home indicator. */
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Range inputs used for seek bars and sliders. */
+input[type='range'].tp-range {
+  appearance: none;
+  background: transparent;
+  height: 24px;
+  cursor: pointer;
+  --pct: 0%;
+}
+input[type='range'].tp-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--tp-fg) var(--pct), var(--tp-line) var(--pct));
+}
+input[type='range'].tp-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--tp-fg) var(--pct), var(--tp-line) var(--pct));
+}
+input[type='range'].tp-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 999px;
+  background: var(--tp-fg);
+  border: none;
+}
+input[type='range'].tp-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--tp-fg);
+  border: none;
+}
+input[type='range'].tp-range:hover::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, var(--tp-accent) var(--pct), var(--tp-line) var(--pct));
+}
+
+@keyframes tp-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+.tp-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--tp-surface-2) 25%,
+    var(--tp-raised) 50%,
+    var(--tp-surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: tp-shimmer 1.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tp-skeleton {
+    animation: none;
+  }
+}
