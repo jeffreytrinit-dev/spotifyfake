@@ -1,15 +1,15 @@
 import { Volume1, Volume2, VolumeX } from 'lucide-react';
 import { IconButton } from '../components/IconButton.js';
 import { Range } from '../components/Range.js';
+import { isAppleMobile } from '../player/platform.js';
 import { usePlayer } from '../player/store.js';
 
 /** Hidden on iPhone, where the hardware buttons control volume and web pages can't. */
 export function VolumeControl({ className = '' }: { className?: string }) {
   const volume = usePlayer((s) => s.volume);
   const muted = usePlayer((s) => s.muted);
-  const engineKind = usePlayer((s) => s.engineKind);
   const { setVolume, toggleMute } = usePlayer.getState();
-  if (engineKind === 'element' && /iPhone|iPad|iPod/.test(navigator.userAgent)) return null;
+  if (isAppleMobile()) return null;
   const v = muted ? 0 : volume;
   const Icon = v === 0 ? VolumeX : v < 0.5 ? Volume1 : Volume2;
   return (
