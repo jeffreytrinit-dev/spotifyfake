@@ -4,18 +4,19 @@ Self-hosted music streaming PWA for your own library. This document covers the
 **folder structure**, **database schema (Prisma)**, **API route list**, and the
 **WebSocket protocol**. Nothing is implemented yet; it's waiting on your review.
 
-Status: **DRAFT — awaiting approval.** See [Open questions](#7-open-questions) at the end.
+Status: **Approved** with changes; see [§7 Decisions](#7-decisions-from-review). Phase 1 is implemented.
 
 ---
 
 ## 1. Architecture at a glance
 
 ```
- Browser / PWA (React)  ──HTTPS──▶  Caddy  ──▶  /api/*, /ws  ──▶  server (Fastify)
-       ▲  Service worker                 └──▶  /*  static web build
-       │  (Workbox, offline cache)                     │
-       │                                               ├─▶ PostgreSQL (Prisma)
- ESP32 / scripts ──REST + WS (bearer token)──▶ server  ├─▶ Meilisearch
+ iPhone app (Capacitor + native audio) ─┐
+ Browser on laptop (React PWA)         ─┴─HTTPS──▶ Caddy ──▶ /api/*, /ws ──▶ server (Fastify)
+       ▲  Service worker                          └──▶ /*  static web build       │
+       │  (Workbox, offline cache)                                                │
+                                                       ├─▶ PostgreSQL (Prisma)
+                                                       ├─▶ Meilisearch
                                                        ├─▶ ffmpeg / ffprobe (child processes)
                                                        ├─▶ MUSIC_DIR (mounted **read-only**)
                                                        └─▶ DATA_DIR (art, transcode cache, uploads)
@@ -38,6 +39,8 @@ Key decisions:
   typed errors (`TranscodeFailed`, `ProbeFailed`) so the client can fall back to
   the original file.
 - **All images are WebP** at 64/300/640 px, generated with `sharp` (ships arm64 builds).
+- **Mobile-first.** The primary client is an iPhone. Every screen is designed at phone width
+  first; desktop is the secondary layout.
 - **Multi-arch Docker images** (amd64 + arm64) from day one, so the Pi 5 move is a
   `docker compose pull`.
 
@@ -60,21 +63,21 @@ tidepool/
 │   │   │   ├── plugins/
 │   │   │   │   ├── prisma.ts
 │   │   │   │   ├── meili.ts
-│   │   │   │   ├── auth.ts              # cookie session + bearer token → request.user
+│   │   │   │   ├── auth.ts              # session (cookie, or bearer from the iOS app) → request.user
 │   │   │   │   ├── rate-limit.ts
 │   │   │   │   ├── errors.ts            # error → JSON problem response
 │   │   │   │   └── websocket.ts
 │   │   │   ├── lib/
 │   │   │   │   ├── safe-path.ts         # resolve-inside-root guard (path traversal)
-│   │   │   │   ├── ffmpeg.ts            # spawn wrapper: timeout, kill, stderr capture
-│   │   │   │   ├── hash.ts              # streaming SHA-256
-│   │   │   │   ├── fractional-index.ts
+│   │   │   │   ├── process.ts           # ffmpeg/ffprobe spawn wrapper: timeout, kill, stderr
+│   │   │   │   ├── hash.ts              # quick hash (size + head/tail 64 KiB) + full SHA-256
+│   │   │   │   ├── fractional-index.ts  # keys + rebalance routine (Phase 4)
 │   │   │   │   └── normalize.ts         # name keys for artist/album dedupe
 │   │   │   ├── jobs/
 │   │   │   │   └── queue.ts             # in-process job queue
 │   │   │   └── modules/                 # each: routes.ts, service.ts, schemas.ts, *.test.ts
 │   │   │       ├── auth/
-│   │   │       ├── users/               # profile, settings, api tokens
+│   │   │       ├── users/               # profile, settings, user admin
 │   │   │       ├── library/
 │   │   │       │   ├── scanner.ts       # walk → diff → upsert
 │   │   │       │   ├── metadata.ts      # music-metadata + fallbacks
@@ -100,7 +103,7 @@ tidepool/
 │   │   │       │   ├── lrc.ts           # LRC parser
 │   │   │       │   └── lrclib.ts        # client + cache
 │   │   │       ├── plays/
-│   │   │       ├── player/              # PlaybackState, device registry, WS hub, REST controls
+│   │   │       ├── player/              # PlaybackState, device registry, WS hub
 │   │   │       ├── recs/                # mixes, radio, on-repeat, forgotten favourites
 │   │   │       ├── stats/
 │   │   │       └── health/
@@ -109,7 +112,8 @@ tidepool/
 │   │   │   └── helpers/                 # test DB (per-worker schema), app factory
 │   │   ├── Dockerfile
 │   │   └── package.json
-│   └── web/
+│   └── web/                             # React app; also the Capacitor iOS app's web layer
+│       ├── ios/                         # Capacitor iOS project (Phase 3, see §8)
 │       ├── public/                      # icons, manifest assets
 │       ├── src/
 │       │   ├── main.tsx
@@ -155,8 +159,7 @@ tidepool/
 │   ├── create-user.ts                   # CLI user creation
 │   └── backup.sh / restore.sh           # pg_dump + DATA_DIR tarball
 ├── docs/
-│   ├── PLAN.md                          # this file
-│   └── API.md                           # Phase 8: external device API
+│   └── PLAN.md                          # this file
 ├── docker-compose.yml                   # dev: postgres + meilisearch (+ optional app)
 ├── .env.example
 ├── pnpm-workspace.yaml
@@ -182,13 +185,15 @@ data/
 |---|---|---|
 | `DATABASE_URL` | `postgresql://tidepool:…@postgres:5432/tidepool` | |
 | `MEILI_URL` / `MEILI_MASTER_KEY` | `http://meili:7700` / — | |
-| `MUSIC_DIR` | `/music` | Container path; host path set in compose |
+| `MUSIC_HOST_DIR` | `D:/Music` | Host folder, mounted read-only at `/music` by compose |
+| `MUSIC_DIR` | `/music` | Path as seen by the server |
 | `DATA_DIR` | `/data` | |
-| `SESSION_SECRET` | — | Cookie signing |
 | `PUBLIC_URL` | `https://tidepool.local` | Cookie domain, CORS origin |
-| `TRANSCODE_CACHE_MAX_GB` | `10` | LRU eviction threshold |
+| `TRANSCODE_CACHE_MAX_GB` | `10` | LRU eviction threshold (Phase 2) |
+| `MISSING_GRACE_DAYS` | `0` | Auto-purge missing tracks after N days. `0` = never (manual purge) |
+| `SCAN_CONCURRENCY` | `4` | Parallel file reads while scanning |
 | `SCAN_ON_STARTUP` / `WATCH_LIBRARY` | `true` / `true` | Watcher can be disabled on NAS/SMB mounts where inotify doesn't fire |
-| `LRCLIB_ENABLED` | `true` | Global kill switch for outbound lyric fetches |
+| `LRCLIB_ENABLED` | `true` | Global kill switch for outbound lyric fetches (Phase 6) |
 | `LOG_LEVEL` | `info` | |
 
 ---
@@ -200,515 +205,40 @@ Design notes:
 - **Multi-user ready.** Library tables (artists/albums/tracks) are global and shared;
   everything personal (playlists, likes, plays, settings, devices, player state)
   is keyed by `userId`.
-- **File identity.** On scan each file is matched **by path first** (cheap: compare
-  size + mtime, skip if unchanged), then **by `contentHash`** (catches moves/renames →
-  update `path`, keep the same `Track.id` so playlists, likes, and history survive),
-  and only otherwise inserted. Missing files get `missingSince` set instead of being
-  deleted, so a temporarily unmounted drive doesn't wipe playlists; purged after a
-  grace period (default 30 days).
-- **Retagging** a file changes its hash but not its path, so the path match keeps the
-  same track id. Moving *and* retagging at the same time between scans is the one
-  case that creates a new track. Acceptable, and documented.
+- **File identity.** On scan each file is matched **by path first**, and skipped entirely if
+  its size and mtime are unchanged. Otherwise it's matched **by content** using a *quick hash*:
+  SHA-256 of the size plus the first and last 64 KiB, so at most 128 KiB is read per file.
+  A file at a new path whose quick hash matches a track whose file is gone is a **move**: the
+  `path` is updated and the `Track.id` is kept, so playlists, likes and history survive. A
+  **full SHA-256** is computed only when the quick hash collides with a file that still exists.
+  It decides between "exact duplicate" (skipped and reported in the scan's errors) and
+  "different file" (new track), and is stored in `fullHash` for next time.
+- **Missing files** get `missingSince` set instead of being deleted, so an unmounted drive
+  doesn't wipe playlists. They're listed under Settings → Missing files with a manual
+  **Purge** button (`GET /library/missing`, `POST /library/missing/purge`). Auto-purge after
+  `MISSING_GRACE_DAYS` exists but is off by default.
+- **Retagging** a file changes its quick hash but not its path, so the path match keeps the
+  same track id. Moving *and* retagging between two scans is the one case that creates a new
+  track; the old one then shows up as missing.
 - **Liked Songs** is a `TrackLike` table rather than a playlist row: "is this liked?"
   checks for whole lists of tracks stay a single indexed lookup. The API presents it as
   a virtual playlist with id `liked`, so the UI treats it like any other playlist.
 - **Playlist ordering** uses fractional-index string keys, so moving one track writes one row.
+  Keys grow longer when you keep inserting at the same spot, so a **rebalance routine**
+  rewrites a playlist's keys evenly in one transaction when any key passes a length
+  threshold. It also runs from a nightly maintenance job.
 - **Generated playlists** (Daily Mix 1–6, On Repeat, Forgotten Favourites) are real
   `Playlist` rows with `kind = GENERATED`, so they can be downloaded for offline use
   and appear in the library like any other playlist.
 - **Plays** carry a client-generated `clientEventId`, so offline play history can be
   re-sent on reconnect without creating duplicates.
 
-```prisma
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-// ───────────────────────────── Users & auth ─────────────────────────────
-
-enum UserRole {
-  ADMIN
-  USER
-}
-
-model User {
-  id           String   @id @default(cuid())
-  email        String   @unique // stored lower-cased
-  displayName  String
-  passwordHash String // argon2id
-  role         UserRole @default(USER)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  settings       UserSettings?
-  sessions       Session[]
-  apiTokens      ApiToken[]
-  devices        Device[]
-  playbackState  PlaybackState?
-  playlists      Playlist[]
-  likes          TrackLike[]
-  plays          PlayEvent[]
-  recentSearches RecentSearch[]
-}
-
-/// Server-side session; the cookie holds only a random token, DB stores its SHA-256.
-model Session {
-  id         String   @id @default(cuid())
-  userId     String
-  tokenHash  String   @unique
-  userAgent  String?
-  ip         String?
-  createdAt  DateTime @default(now())
-  lastUsedAt DateTime @default(now())
-  expiresAt  DateTime
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([expiresAt])
-}
-
-/// Long-lived bearer tokens for headless clients (ESP32 display etc.). Shown once, stored hashed.
-model ApiToken {
-  id         String    @id @default(cuid())
-  userId     String
-  name       String
-  tokenHash  String    @unique
-  scopes     String[] // e.g. ["player:read", "player:control"]
-  createdAt  DateTime  @default(now())
-  lastUsedAt DateTime?
-  revokedAt  DateTime?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-}
-
-enum StreamQuality {
-  LOW // Opus 96
-  NORMAL // Opus 160
-  HIGH // Opus 320
-  VERY_HIGH // AAC 256 (see open question)
-  LOSSLESS // original passthrough
-}
-
-enum ThemePref {
-  DARK
-  LIGHT
-  SYSTEM
-}
-
-model UserSettings {
-  userId              String        @id
-  streamQualityWifi   StreamQuality @default(HIGH)
-  streamQualityCell   StreamQuality @default(NORMAL)
-  downloadQuality     StreamQuality @default(HIGH)
-  autoAdjustQuality   Boolean       @default(true)
-  crossfadeSeconds    Int           @default(0) // 0–12, validated by zod
-  gapless             Boolean       @default(true)
-  normalization       Boolean       @default(true)
-  normalizationMode   String        @default("track") // "track" | "album"
-  eqEnabled           Boolean       @default(false)
-  eqPreset            String?
-  eqBands             Float[] // 10 gains in dB, -12..+12
-  theme               ThemePref     @default(DARK)
-  offlineStorageCapMb Int           @default(4096)
-  fetchLyricsOnline   Boolean       @default(true) // LRCLIB opt-in/out
-  updatedAt           DateTime      @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-
-// ───────────────────────────── Library ─────────────────────────────
-
-model Artist {
-  id        String   @id @default(cuid())
-  name      String
-  sortName  String
-  nameKey   String   @unique // normalised (lower, trimmed, unicode-folded) for dedupe
-  imageId   String? // falls back to an album cover in the API
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  image        Artwork?      @relation(fields: [imageId], references: [id], onDelete: SetNull)
-  albums       Album[]       @relation("AlbumArtist")
-  tracks       Track[]       @relation("TrackPrimaryArtist")
-  trackCredits TrackArtist[]
-
-  @@index([sortName])
-}
-
-model Album {
-  id            String    @id @default(cuid())
-  title         String
-  sortTitle     String
-  albumArtistId String
-  albumKey      String    @unique // hash(normalised album artist + title) for dedupe
-  year          Int?
-  releaseDate   DateTime?
-  isCompilation Boolean   @default(false)
-  artworkId     String?
-  trackCount    Int       @default(0) // denormalised, maintained by scanner
-  discCount     Int       @default(1)
-  durationMs    Int       @default(0)
-  replayGainDb  Float? // album gain
-  replayPeak    Float?
-  createdAt     DateTime  @default(now()) // "recently added" sort key
-  updatedAt     DateTime  @updatedAt
-
-  albumArtist Artist   @relation("AlbumArtist", fields: [albumArtistId], references: [id])
-  artwork     Artwork? @relation(fields: [artworkId], references: [id], onDelete: SetNull)
-  tracks      Track[]
-
-  @@index([albumArtistId])
-  @@index([createdAt])
-  @@index([year])
-}
-
-enum LoudnessSource {
-  TAG // ReplayGain tags in file
-  ANALYZED // ffmpeg ebur128
-}
-
-model Track {
-  id            String @id @default(cuid())
-  title         String
-  sortTitle     String
-  albumId       String
-  artistId      String // primary artist (first credited)
-  artistDisplay String // full credit string as tagged, e.g. "A feat. B"
-  trackNumber   Int?
-  discNumber    Int    @default(1)
-  year          Int?
-  durationMs    Int
-
-  // File identity
-  path         String    @unique // relative to MUSIC_DIR, POSIX separators
-  contentHash  String    @unique // SHA-256 of file bytes → survives moves/renames
-  fileSize     BigInt
-  fileMtime    DateTime
-  missingSince DateTime? // soft-delete: file vanished; purged after grace period
-
-  // Format
-  container  String // "flac" | "mp3" | "mp4" | "ogg" | "wav" ...
-  codec      String // "flac" | "mp3" | "aac" | "alac" | "opus" | "vorbis" | "pcm_s16le"
-  bitrate    Int? // bps
-  sampleRate Int?
-  bitDepth   Int?
-  channels   Int?
-  lossless   Boolean
-
-  // Loudness / normalisation
-  replayGainDb   Float?
-  replayPeak     Float?
-  loudnessLufs   Float?
-  loudnessSource LoudnessSource?
-
-  // Optional audio features (Phase 9, Essentia if feasible)
-  bpm        Float?
-  musicalKey String?
-  energy     Float?
-
-  artworkId     String? // embedded art; API falls back to album art
-  hasLyricsFile Boolean  @default(false) // sidecar .lrc seen at scan
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  album          Album            @relation(fields: [albumId], references: [id])
-  artist         Artist           @relation("TrackPrimaryArtist", fields: [artistId], references: [id])
-  artwork        Artwork?         @relation(fields: [artworkId], references: [id], onDelete: SetNull)
-  credits        TrackArtist[]
-  genres         TrackGenre[]
-  lyrics         Lyrics?
-  transcodes     TranscodeCache[]
-  playlistTracks PlaylistTrack[]
-  likes          TrackLike[]
-  plays          PlayEvent[]
-
-  @@index([albumId, discNumber, trackNumber])
-  @@index([artistId])
-  @@index([createdAt])
-  @@index([missingSince])
-}
-
-/// All credited artists of a track (supports "feat." and multi-artist tags).
-model TrackArtist {
-  trackId  String
-  artistId String
-  role     String @default("main") // "main" | "featured"
-  position Int
-
-  track  Track  @relation(fields: [trackId], references: [id], onDelete: Cascade)
-  artist Artist @relation(fields: [artistId], references: [id], onDelete: Cascade)
-
-  @@id([trackId, artistId])
-  @@index([artistId])
-}
-
-model Genre {
-  id     String       @id @default(cuid())
-  name   String
-  key    String       @unique // normalised
-  tracks TrackGenre[]
-}
-
-model TrackGenre {
-  trackId String
-  genreId String
-
-  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
-  genre Genre @relation(fields: [genreId], references: [id], onDelete: Cascade)
-
-  @@id([trackId, genreId])
-  @@index([genreId])
-}
-
-enum ArtworkSource {
-  EMBEDDED
-  FOLDER // cover.jpg / folder.png next to audio
-  UPLOAD // user-uploaded playlist cover
-  MOSAIC // generated 2x2 playlist cover
-}
-
-/// Deduplicated by image hash. Files live at $DATA_DIR/art/<hash[0..2]>/<hash>_{64,300,640}.webp
-model Artwork {
-  id            String        @id @default(cuid())
-  hash          String        @unique
-  source        ArtworkSource
-  width         Int
-  height        Int
-  dominantColor String? // hex, for UI tinting
-  createdAt     DateTime      @default(now())
-
-  albums    Album[]
-  tracks    Track[]
-  artists   Artist[]
-  playlists Playlist[]
-}
-
-enum LyricsSource {
-  LRC_FILE
-  EMBEDDED
-  LRCLIB
-  NOT_FOUND // negative cache so we don't hammer LRCLIB
-}
-
-model Lyrics {
-  trackId   String       @id
-  source    LyricsSource
-  synced    Boolean
-  content   String? // raw LRC or plain text
-  language  String?
-  fetchedAt DateTime     @default(now())
-
-  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
-}
-
-/// Transcoded files on disk ($DATA_DIR/transcode/...). Used for LRU eviction under a size cap.
-model TranscodeCache {
-  id             String   @id @default(cuid())
-  trackId        String
-  profile        String // "opus96" | "opus160" | "opus320" | "aac256" | "flac"
-  path           String   @unique
-  sizeBytes      BigInt
-  createdAt      DateTime @default(now())
-  lastAccessedAt DateTime @default(now())
-
-  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
-
-  @@unique([trackId, profile])
-  @@index([lastAccessedAt])
-}
-
-enum ScanStatus {
-  RUNNING
-  COMPLETED
-  FAILED
-  CANCELLED
-}
-
-model ScanRun {
-  id         String     @id @default(cuid())
-  trigger    String // "startup" | "manual" | "watcher"
-  status     ScanStatus @default(RUNNING)
-  startedAt  DateTime   @default(now())
-  finishedAt DateTime?
-  filesSeen  Int        @default(0)
-  added      Int        @default(0)
-  updated    Int        @default(0)
-  moved      Int        @default(0)
-  removed    Int        @default(0)
-  errors     Json       @default("[]") // [{path, message}]
-}
-
-// ───────────────────────────── Playlists & likes ─────────────────────────────
-
-enum PlaylistKind {
-  NORMAL
-  SMART // tracks resolved from `rules` at read time
-  GENERATED // Daily Mix, On Repeat, etc. — rebuilt by the recs job
-}
-
-model Playlist {
-  id            String       @id @default(cuid())
-  ownerId       String
-  name          String
-  description   String?
-  kind          PlaylistKind @default(NORMAL)
-  rules         Json? // SMART: zod-validated rule tree; see PLAN.md
-  generatorKey  String? // GENERATED: e.g. "daily-mix:2", "on-repeat"
-  coverId       String? // UPLOAD or MOSAIC artwork
-  coverIsCustom Boolean      @default(false)
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  generatedAt   DateTime?
-
-  owner  User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  cover  Artwork?        @relation(fields: [coverId], references: [id], onDelete: SetNull)
-  tracks PlaylistTrack[]
-
-  @@unique([ownerId, generatorKey])
-  @@index([ownerId])
-}
-
-/// One row per entry (duplicates allowed). Ordered by a fractional-index string so
-/// a drag-reorder updates exactly one row.
-model PlaylistTrack {
-  id         String   @id @default(cuid())
-  playlistId String
-  trackId    String
-  sortKey    String
-  addedAt    DateTime @default(now())
-
-  playlist Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
-  track    Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
-
-  @@index([playlistId, sortKey])
-  @@index([trackId])
-}
-
-/// "Liked Songs" — exposed by the API as a virtual playlist with id "liked".
-model TrackLike {
-  userId  String
-  trackId String
-  likedAt DateTime @default(now())
-
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
-
-  @@id([userId, trackId])
-  @@index([userId, likedAt])
-}
-
-// ───────────────────────────── Listening history ─────────────────────────────
-
-model PlayEvent {
-  id                 String   @id @default(cuid())
-  clientEventId      String   @unique // idempotency key: offline plays are re-sent safely
-  userId             String
-  trackId            String
-  deviceId           String?
-  listeningSessionId String // plays < 30 min apart share a session (co-listening signal)
-  startedAt          DateTime
-  msPlayed           Int
-  percentPlayed      Float // 0..1
-  skipped            Boolean
-  contextType        String? // "album" | "playlist" | "artist" | "radio" | "search" | "queue"
-  contextId          String?
-  playedOffline      Boolean  @default(false)
-  receivedAt         DateTime @default(now())
-
-  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  track  Track   @relation(fields: [trackId], references: [id], onDelete: Cascade)
-  device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
-
-  @@index([userId, startedAt])
-  @@index([userId, trackId, startedAt])
-  @@index([listeningSessionId])
-}
-
-/// Materialised by a nightly job from PlayEvent sessions. trackAId < trackBId.
-model TrackCooccurrence {
-  userId    String
-  trackAId  String
-  trackBId  String
-  score     Float
-  updatedAt DateTime @updatedAt
-
-  @@id([userId, trackAId, trackBId])
-  @@index([userId, trackAId, score])
-  @@index([userId, trackBId, score])
-}
-
-model RecentSearch {
-  id         String   @id @default(cuid())
-  userId     String
-  query      String?
-  entityType String? // set when the user clicked a result: "track" | "album" | "artist" | "playlist"
-  entityId   String?
-  createdAt  DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, createdAt])
-}
-
-// ───────────────────────────── Devices & playback ─────────────────────────────
-
-enum DeviceType {
-  DESKTOP
-  PHONE
-  TABLET
-  EXTERNAL // ESP32 etc. — control/display only, cannot be a playback target
-}
-
-model Device {
-  id         String     @id // client-generated UUID, persisted in localStorage
-  userId     String
-  name       String
-  type       DeviceType
-  canPlay    Boolean    @default(true)
-  userAgent  String?
-  lastSeenAt DateTime   @default(now())
-  createdAt  DateTime   @default(now())
-
-  user  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plays PlayEvent[]
-
-  @@index([userId])
-}
-
-enum RepeatMode {
-  OFF
-  ALL
-  ONE
-}
-
-/// Authoritative per-user player state (source for reload-restore and device transfer).
-/// Live position is interpolated: positionMs + (now - positionUpdatedAt) when isPlaying.
-model PlaybackState {
-  userId            String     @id
-  activeDeviceId    String?
-  currentTrackId    String?
-  positionMs        Int        @default(0)
-  positionUpdatedAt DateTime   @default(now())
-  isPlaying         Boolean    @default(false)
-  volume            Float      @default(1) // 0..1
-  shuffle           Boolean    @default(false)
-  repeat            RepeatMode @default(OFF)
-  queue             Json       @default("{}") // {context, items[], userQueue[], shuffleOrder[], index}
-  history           Json       @default("[]") // last ~100 played track ids
-  version           Int        @default(0) // optimistic concurrency for WS updates
-  updatedAt         DateTime   @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-```
+The schema lives in [`apps/server/prisma/schema.prisma`](../apps/server/prisma/schema.prisma),
+the single source of truth. The copy that was here during review has been removed so the two
+can't drift. Models: `User`, `Session`, `UserSettings`, `Artist`, `Album`, `Track`,
+`TrackArtist`, `Genre`, `TrackGenre`, `Artwork`, `Lyrics`, `TranscodeCache`, `ScanRun`,
+`Playlist`, `PlaylistTrack`, `TrackLike`, `PlayEvent`, `TrackCooccurrence`, `RecentSearch`,
+`Device`, `PlaybackState`.
 
 ### Smart playlist rule format (stored in `Playlist.rules`, zod-validated)
 
@@ -738,9 +268,9 @@ notContains, gt, gte, lt, lte, between, inLast, notInLast`. The rule tree compil
 Conventions: JSON bodies validated with zod (shared schemas); errors are
 `{ error: { code, message, details? } }`; list endpoints use cursor pagination
 (`?cursor=&limit=`, max 200); all routes require auth except `/auth/*` and `/healthz`.
-Auth = `tp_session` httpOnly, `SameSite=Lax`, `Secure` cookie, **or** `Authorization: Bearer <api token>`
-(scoped; for headless devices only). State-changing cookie-authed requests require the
-`X-Requested-With` header (simple CSRF defence alongside SameSite).
+Auth = `tp_session` httpOnly, `SameSite=Lax`, `Secure` cookie. State-changing cookie-authed
+requests require the `X-Requested-With` header (simple CSRF defence alongside SameSite).
+The Capacitor iOS app will send the same session token as `Authorization: Bearer` (see §8).
 
 ### Auth & account
 | Method | Path | Purpose | Phase |
@@ -754,8 +284,6 @@ Auth = `tp_session` httpOnly, `SameSite=Lax`, `Secure` cookie, **or** `Authoriza
 | PATCH | `/me` | Display name, email | 4 |
 | POST | `/me/password` | Change password (revokes other sessions) | 4 |
 | GET / PATCH | `/me/settings` | Quality, crossfade, EQ, normalisation, theme, offline cap | 2–3 |
-| GET / POST | `/me/api-tokens` | List / create (token returned once) | 8 |
-| DELETE | `/me/api-tokens/:id` | Revoke | 8 |
 | GET / POST | `/admin/users` | Admin: list / create users | 10 |
 
 ### Library management
@@ -765,6 +293,8 @@ Auth = `tp_session` httpOnly, `SameSite=Lax`, `Secure` cookie, **or** `Authoriza
 | GET | `/library/scan/:id` | Progress + counts + errors | 1 |
 | GET | `/library/scans` | Recent scan runs | 1 |
 | GET | `/library/stats` | Track/album/artist counts, total size & duration | 1 |
+| GET | `/library/missing` | Missing tracks, with what a purge would remove (playlist entries, like, plays) | 1 |
+| POST | `/library/missing/purge` | Admin: `{ trackIds? }` purges some or all missing tracks | 1 |
 
 ### Catalog (read)
 | Method | Path | Purpose | Phase |
@@ -783,7 +313,7 @@ Auth = `tp_session` httpOnly, `SameSite=Lax`, `Secure` cookie, **or** `Authoriza
 ### Streaming
 | Method | Path | Purpose | Phase |
 |---|---|---|---|
-| GET/HEAD | `/stream/:trackId` | `?q=low|normal|high|very_high|lossless`. Range-capable. Serves the original when it's already at or below the requested quality (no pointless upscaling); otherwise serves the cached transcode, transcoding first if needed | 2 |
+| GET/HEAD | `/stream/:trackId` | `?q=low\|normal\|high\|lossless&codecs=opus,aac,flac,mp3`. Range-capable. Serves the **original** if it's at or below the requested tier *and* the client can decode its codec (never transcode up). Otherwise serves the cached transcode, transcoding first if needed. Lossless tier: FLAC/ALAC originals pass through; WAV is re-encoded to FLAC (lossless) and cached. AAC 256 is chosen automatically for clients that can't decode Opus | 2 |
 | GET/HEAD | `/stream/:trackId/original` | Original bytes, Range-capable (used for Lossless + downloads) | 2 |
 | GET | `/stream/:trackId/info` | Which file/profile `?q=` resolves to: codec, bitrate, size, `cached` | 2 |
 
@@ -841,19 +371,13 @@ client also prefetches the next track's transcode via `HEAD`.
 | GET | `/stats/year/:year` | Year-in-review payload (top lists, per-month minutes, listening clock, streaks) | 9 |
 
 ### Player & devices (Connect-style)
-REST mirrors the WS commands, so simple HTTP clients (ESP32) can work without WS.
+Remote control between your own clients (phone ↔ laptop) goes over the WebSocket. REST is used
+only for persistence and device management.
 
 | Method | Path | Purpose | Phase |
 |---|---|---|---|
-| GET | `/me/player` | Full PlaybackState (queue, position, active device) | 3 / 8 |
+| GET | `/me/player` | Full PlaybackState (queue, position, active device), to restore after a reload | 3 |
 | PUT | `/me/player` | Persist state from the active device (queue, index, position). Uses `version` for optimistic concurrency | 3 |
-| GET | `/me/player/now-playing` | Compact: track, artist, album, art URL (64/300), `positionMs`, `durationMs`, `isPlaying`, `volume`, device. Built for small displays | 8 |
-| POST | `/me/player/play` · `/pause` · `/next` · `/previous` | Control the active device | 8 |
-| POST | `/me/player/seek` | `{ positionMs }` | 8 |
-| POST | `/me/player/volume` | `{ volume: 0..1 }` | 8 |
-| POST | `/me/player/shuffle` · `/repeat` | `{ on }` · `{ mode }` | 8 |
-| POST | `/me/player/queue` | `{ trackIds[], mode: "next"|"last" }` | 8 |
-| POST | `/me/player/transfer` | `{ deviceId, play?: boolean }` | 8 |
 | GET | `/me/devices` | Online + recently seen devices | 8 |
 | PATCH / DELETE | `/me/devices/:id` | Rename / forget | 8 |
 
@@ -861,7 +385,7 @@ REST mirrors the WS commands, so simple HTTP clients (ESP32) can work without WS
 
 ## 5. WebSocket protocol (`GET /api/v1/ws`)
 
-Auth: session cookie, or `?token=` / `Authorization: Bearer` for API tokens.
+Auth: session cookie (browser) or the session token as `Authorization: Bearer` (iOS app).
 JSON messages are validated with the zod union in `packages/shared/src/ws.ts`.
 Heartbeat: server pings every 15 s; a device that misses 2 pongs is marked offline,
 and if it was the active device, playback state is frozen at its last reported
@@ -898,37 +422,59 @@ and `activate` to B with the queue and an interpolated position → broadcasts `
 
 | Phase | Unit (Vitest) | Integration / E2E |
 |---|---|---|
-| 1 Ingestion | filename parser, name normalisation, safe-path, hash, art dedupe | Scan a generated fixture library (ffmpeg-made tagged/untagged files): counts, move detection, missing → soft delete, Meili docs |
+| 1 Ingestion | filename parser, name normalisation, safe-path, quick hash, credits | Scan a generated fixture library (ffmpeg-made tagged/untagged files): counts, move detection, quick-hash collisions, duplicates, missing → soft delete → purge, watcher, Meili docs |
 | 2 Streaming | Range parser, profile selection | 206/416 responses, seek mid-file, transcode cache hit, ffmpeg failure → 502 + fallback |
 | 3 Player | queue + true-shuffle, crossfade scheduler math, ReplayGain → gain | Playwright: play/skip/seek, reload restores queue+position, keyboard shortcuts |
-| 4 Library | smart-rule compiler, fractional index, M3U parse/emit | CRUD + reorder, M3U round-trip |
+| 4 Library | smart-rule compiler, fractional index + rebalance, M3U parse/emit | CRUD + reorder (incl. 1000 inserts at one spot → rebalance), M3U round-trip |
 | 5 Search | — | typo query ("radiohed") hits, filter chips |
 | 6 Lyrics | LRC parser (multi-timestamp lines, offsets) | sidecar > embedded > LRCLIB (mocked), negative cache |
 | 7 Offline | storage cap/eviction logic | Playwright offline mode: downloaded album plays, plays sync on reconnect |
-| 8 Connect | WS message schemas, state interpolation | Two browser contexts: transfer, remote control; REST controls via token |
+| 8 Connect | WS message schemas, state interpolation | Two browser contexts: transfer, remote control |
 | 9 Recs/stats | co-occurrence scoring, forgotten-favourites query | seeded play history → expected mixes |
 | 10 Polish | — | axe accessibility checks, responsive screenshots, `docker compose up` smoke test on amd64 + arm64 (QEMU) |
 
-Test DB: Postgres in Docker; each Vitest worker gets its own schema. Meilisearch tests use a
-per-run index prefix.
+Test DB: a separate `tidepool_test` database, migrated by Vitest's global setup. Test files run
+serially and truncate tables. Meilisearch tests use a random per-app index prefix.
 
 ---
 
-## 7. Open questions
+## 7. Decisions from review
 
-1. **Very High quality.** Your list maps Very High → AAC 256, which is a step *down* from
-   High = Opus 320. Proposal: Low = Opus 96, Normal = Opus 160, High = Opus 320,
-   Very High = **AAC 256 used only as the compatibility profile for old iOS Safari** (picked
-   automatically when the browser can't decode Opus), and Lossless = original FLAC/ALAC/WAV
-   passthrough. In other words, four quality levels plus automatic codec selection. Or did you
-   want AAC 256 as an explicit user choice?
-2. **Lossless for non-FLAC sources.** WAV is about twice the size of FLAC. Should Lossless
-   transcode WAV → FLAC on the fly (same quality, half the bandwidth), or pass every lossless
-   file through untouched?
-3. **User creation.** Proposal: first-run setup screen creates the admin; after that,
-   **no public sign-up**. The admin adds users from settings or with `scripts/create-user.ts`.
-   OK?
-4. **Lossy sources at High/Lossless.** For an MP3 at 320 kbps, "High" and "Lossless" should
-   both serve the original MP3. Transcoding lossy → lossy only lowers quality. Agree?
-5. **Essentia audio features (Phase 9).** The ARM64 build is painful. Proposal: make it an
-   optional sidecar container, with recommendations working fully without it. OK to defer?
+1. **Quality tiers:** Low (Opus 96), Normal (Opus 160), High (Opus 320), Lossless. AAC 256 is
+   not a user-facing tier. It's picked automatically for clients that can't decode Opus.
+2. **WAV under Lossless:** re-encoded to FLAC on the fly (lossless, about half the size) and cached.
+3. **Accounts:** a first-run setup screen creates the admin. No public sign-up; the admin adds users.
+4. **Never transcode up:** the original is served if it's at or below the target tier and the
+   client can play its codec. Otherwise the server transcodes (to FLAC for lossless sources).
+5. **Essentia:** optional sidecar container, deferred. Recommendations must work without it.
+6. **No external devices (ESP32).** The `ApiToken` model, the `EXTERNAL` device type and the
+   REST mirrors of player commands are removed. Cross-device control is only between Tidepool
+   clients, over WebSocket.
+7. **Mobile-first**, with the iPhone as the primary target.
+8. **Hashing:** quick hash (size + first/last 64 KiB). A full hash is computed only on collision.
+9. **Missing files:** a settings page lists them, with a manual purge. Auto-purge is off by default.
+10. **Fractional sort keys** get a rebalance routine (Phase 4).
+
+## 8. iOS app (Capacitor), planned for Phase 3
+
+Locked-screen background playback isn't reliable for a home-screen PWA on iOS. So the iPhone
+client is the same React app wrapped in **Capacitor**, with a **native audio plugin** handling
+playback. What this implies (to confirm before Phase 3):
+
+- **Building needs a Mac with Xcode**, or a hosted macOS CI runner such as GitHub Actions.
+  The Windows/Linux laptop can build the web layer but not the iOS app. With a free Apple ID,
+  an app installed on your own phone **expires after 7 days**. A paid Apple Developer account
+  ($99/year) gives 1-year signing and TestFlight.
+- **Two audio engines.** On iOS the native player does playback, so features built on Web
+  Audio (gapless, crossfade, 10-band EQ, ReplayGain) must be reimplemented natively for iOS
+  or reduced there. Plan: gapless and ReplayGain natively (AVQueuePlayer handles gapless;
+  ReplayGain is a volume multiplier), and EQ through `AVAudioUnitEQ` if the plugin is built on
+  AVAudioEngine. Crossfade is the hardest part on iOS and may be deferred. The browser keeps
+  the full Web Audio engine.
+- **Auth from the app:** the app's origin is `capacitor://localhost`, so cookies sent to the
+  server are cross-site. The app will send the session token as a Bearer header (same
+  `Session` table), and native audio requests will carry it as a header.
+- **Offline (Phase 7) on iOS** stores downloads in the app's file system through the native
+  layer instead of Cache Storage, so the native player can read them while the phone is locked.
+- **Lock screen / Control Center** metadata comes from the native plugin
+  (`MPNowPlayingInfoCenter`), which replaces the Media Session API on iOS.
