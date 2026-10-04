@@ -35,6 +35,11 @@ const EnvSchema = z.object({
   MISSING_GRACE_DAYS: z.coerce.number().int().min(0).default(0),
   SCAN_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
 
+  TRANSCODE_CACHE_MAX_GB: z.coerce.number().min(0.1).default(10),
+  /** Simultaneous ffmpeg transcodes (2 suits a Raspberry Pi 5; raise on a desktop). */
+  TRANSCODE_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+  TRANSCODE_TIMEOUT_SEC: z.coerce.number().int().min(10).default(600),
+
   SESSION_TTL_DAYS: z.coerce.number().int().min(1).default(30),
 });
 

@@ -274,12 +274,15 @@ model Lyrics {
   track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
 }
 
-/// Transcoded files on disk ($DATA_DIR/transcode/...). Used for LRU eviction under a size cap.
+/// Transcoded files on disk ($DATA_DIR/transcode/<trackId>/<profile>.<ext>), evicted LRU-first
+/// once the cache exceeds TRANSCODE_CACHE_MAX_GB.
 model TranscodeCache {
   id             String   @id @default(cuid())
   trackId        String
-  profile        String // "opus96" | "opus160" | "opus320" | "aac256" | "flac"
-  path           String   @unique
+  profile        String // TranscodeProfileId: "opus96" | "opus160" | "opus320" | "aac96" | "aac160" | "aac256" | "flac"
+  /// Track.quickHash the transcode was made from; a mismatch means the source changed.
+  sourceHash     String
+  path           String   @unique // relative to DATA_DIR
   sizeBytes      BigInt
   createdAt      DateTime @default(now())
   lastAccessedAt DateTime @default(now())
