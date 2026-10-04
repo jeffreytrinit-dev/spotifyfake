@@ -1,6 +1,9 @@
 # Tidepool — local stack. Copy .env.example to .env, set MUSIC_HOST_DIR, then:
 #   docker compose up -d --build
-# Phase 10 adds the web frontend and Caddy (HTTPS) in front of the server.
+# Then open http://localhost:3000 on this computer.
+#
+# For your iPhone, follow docs/IPHONE.md. Either use Tailscale (no changes here), or HTTPS on
+# your home Wi-Fi with:   docker compose --profile lan-https up -d
 name: tidepool
 
 services:
@@ -63,7 +66,28 @@ services:
     ports:
       - '3000:3000'
 
+  # Optional: HTTPS on your home network (see docs/IPHONE.md, option B).
+  caddy:
+    image: caddy:2.10
+    profiles: ['lan-https']
+    restart: unless-stopped
+    depends_on: [server]
+    environment:
+      TIDEPOOL_LAN_IP: ${TIDEPOOL_LAN_IP:-}
+    # Fail clearly (instead of with a Caddyfile parse error) if the address isn't set.
+    command:
+      - sh
+      - -c
+      - '[ -n "$$TIDEPOOL_LAN_IP" ] || { echo "Set TIDEPOOL_LAN_IP in .env (see docs/IPHONE.md)"; exit 1; }; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile'
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./deploy/Caddyfile.lan:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+
 volumes:
+  caddydata:
   pgdata:
   meilidata:
   appdata:

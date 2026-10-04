@@ -8,12 +8,14 @@
   },
   "scripts": {
     "dev": "pnpm --filter @tidepool/server dev",
-    "build": "pnpm -r build",
+    "build": "pnpm --filter @tidepool/web build && pnpm --filter @tidepool/server build",
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "dev:web": "pnpm --filter @tidepool/web dev",
+    "e2e": "pnpm --filter @tidepool/web build && pnpm --filter @tidepool/web e2e"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.0",

@@ -1,0 +1,34 @@
+# HTTPS for Tidepool on your home Wi-Fi, without Tailscale.
+#
+# Caddy acts as its own small certificate authority. Your iPhone trusts it once you install
+# its root certificate (see docs/IPHONE.md, "Option B"). TIDEPOOL_LAN_IP is your computer's
+# address on the home network, e.g. 192.168.1.23 (set in .env).
+{
+	# Use Caddy's private authority; never try to reach Let's Encrypt for a LAN address.
+	local_certs
+	# Don't try to add the root to this container's own trust store.
+	skip_install_trust
+	# iPhones connecting to an IP address send no server name; answer with this certificate.
+	default_sni {$TIDEPOOL_LAN_IP}
+}
+
+https://{$TIDEPOOL_LAN_IP} {
+	tls internal
+	encode zstd gzip
+	reverse_proxy {$TIDEPOOL_UPSTREAM:server:3000}
+}
+
+# Plain HTTP: only to download the root certificate (the phone can't use HTTPS before it
+# trusts it). Everything else is redirected to HTTPS.
+http://{$TIDEPOOL_LAN_IP} {
+	handle /ca {
+		root * {$CADDY_DATA_ROOT:/data/caddy}
+		rewrite * /pki/authorities/local/root.crt
+		header Content-Type application/x-x509-ca-cert
+		header Content-Disposition "attachment; filename=tidepool-home-ca.crt"
+		file_server
+	}
+	handle {
+		redir https://{host}{uri} permanent
+	}
+}

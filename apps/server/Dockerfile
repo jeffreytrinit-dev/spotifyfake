@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build context: repository root.  docker build -f apps/server/Dockerfile .
+# One image: API + scanner + transcoder + the built web app.
 # Multi-arch: works for linux/amd64 and linux/arm64 (Raspberry Pi 5) unchanged.
 
 FROM node:22-bookworm-slim AS base
@@ -10,14 +11,18 @@ WORKDIR /repo
 FROM base AS build
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
+COPY apps/web/package.json apps/web/
 COPY apps/server/package.json apps/server/prisma.config.ts apps/server/
 COPY apps/server/prisma apps/server/prisma
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY packages/shared packages/shared
+COPY apps/web apps/web
 COPY apps/server apps/server
-RUN pnpm --filter @tidepool/server build \
+RUN pnpm --filter @tidepool/web exec vite build \
+ && pnpm --filter @tidepool/server build \
  && pnpm --filter @tidepool/server deploy --prod --legacy /out \
- && cp -r apps/server/dist /out/dist
+ && cp -r apps/server/dist /out/dist \
+ && cp -r apps/web/dist /out/web
 
 FROM node:22-bookworm-slim AS runtime
 RUN apt-get update \
@@ -28,6 +33,7 @@ COPY --from=build --chown=node:node /out ./
 ENV NODE_ENV=production \
     MUSIC_DIR=/music \
     DATA_DIR=/data \
+    WEB_DIR=/app/web \
     PORT=3000
 RUN mkdir -p /data && chown node:node /data
 USER node
