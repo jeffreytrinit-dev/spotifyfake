@@ -1,0 +1,67 @@
+# Tidepool — local stack. Copy .env.example to .env, set MUSIC_HOST_DIR, then:
+#   docker compose up -d --build
+# Phase 10 adds the web frontend and Caddy (HTTPS) in front of the server.
+name: tidepool
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tidepool}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-tidepool}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - '127.0.0.1:5432:5432' # for local dev tools only; not exposed to the LAN
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-tidepool}']
+      interval: 5s
+      retries: 10
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.16
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set MEILI_MASTER_KEY in .env}
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: 'true'
+    volumes:
+      - meilidata:/meili_data
+    ports:
+      - '127.0.0.1:7700:7700'
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:7700/health']
+      interval: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      meilisearch: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tidepool}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tidepool}
+      MEILI_URL: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SCAN_ON_STARTUP: ${SCAN_ON_STARTUP:-true}
+      WATCH_LIBRARY: ${WATCH_LIBRARY:-true}
+      WATCH_POLLING: ${WATCH_POLLING:-false}
+      MISSING_GRACE_DAYS: ${MISSING_GRACE_DAYS:-0}
+      SCAN_CONCURRENCY: ${SCAN_CONCURRENCY:-4}
+    volumes:
+      - ${MUSIC_HOST_DIR:?set MUSIC_HOST_DIR in .env}:/music:ro
+      - appdata:/data
+    ports:
+      - '3000:3000'
+
+volumes:
+  pgdata:
+  meilidata:
+  appdata:
