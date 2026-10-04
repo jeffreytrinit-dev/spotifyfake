@@ -1,0 +1,473 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Users & auth ─────────────────────────────
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique // stored lower-cased
+  displayName  String
+  passwordHash String // argon2id
+  role         UserRole @default(USER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  settings       UserSettings?
+  sessions       Session[]
+  devices        Device[]
+  playbackState  PlaybackState?
+  playlists      Playlist[]
+  likes          TrackLike[]
+  plays          PlayEvent[]
+  recentSearches RecentSearch[]
+}
+
+/// Server-side session; the cookie holds only a random token, DB stores its SHA-256.
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  userAgent  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum StreamQuality {
+  LOW // Opus 96
+  NORMAL // Opus 160
+  HIGH // Opus 320
+  LOSSLESS // original passthrough (WAV is re-encoded to FLAC losslessly)
+  // AAC 256 is not a user-facing level: it's picked automatically for clients that can't decode Opus.
+}
+
+enum ThemePref {
+  DARK
+  LIGHT
+  SYSTEM
+}
+
+model UserSettings {
+  userId              String        @id
+  streamQualityWifi   StreamQuality @default(HIGH)
+  streamQualityCell   StreamQuality @default(NORMAL)
+  downloadQuality     StreamQuality @default(HIGH)
+  autoAdjustQuality   Boolean       @default(true)
+  crossfadeSeconds    Int           @default(0) // 0–12, validated by zod
+  gapless             Boolean       @default(true)
+  normalization       Boolean       @default(true)
+  normalizationMode   String        @default("track") // "track" | "album"
+  eqEnabled           Boolean       @default(false)
+  eqPreset            String?
+  eqBands             Float[] // 10 gains in dB, -12..+12
+  theme               ThemePref     @default(DARK)
+  offlineStorageCapMb Int           @default(4096)
+  fetchLyricsOnline   Boolean       @default(true) // LRCLIB opt-in/out
+  updatedAt           DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ───────────────────────────── Library ─────────────────────────────
+
+model Artist {
+  id        String   @id @default(cuid())
+  name      String
+  sortName  String
+  nameKey   String   @unique // normalised (lower, trimmed, unicode-folded) for dedupe
+  imageId   String? // falls back to an album cover in the API
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  image        Artwork?      @relation(fields: [imageId], references: [id], onDelete: SetNull)
+  albums       Album[]       @relation("AlbumArtist")
+  tracks       Track[]       @relation("TrackPrimaryArtist")
+  trackCredits TrackArtist[]
+
+  @@index([sortName])
+}
+
+model Album {
+  id            String    @id @default(cuid())
+  title         String
+  sortTitle     String
+  albumArtistId String
+  albumKey      String    @unique // hash(normalised album artist + title) for dedupe
+  year          Int?
+  releaseDate   DateTime?
+  isCompilation Boolean   @default(false)
+  artworkId     String?
+  trackCount    Int       @default(0) // denormalised, maintained by scanner
+  discCount     Int       @default(1)
+  durationMs    Int       @default(0)
+  replayGainDb  Float? // album gain
+  replayPeak    Float?
+  createdAt     DateTime  @default(now()) // "recently added" sort key
+  updatedAt     DateTime  @updatedAt
+
+  albumArtist Artist   @relation("AlbumArtist", fields: [albumArtistId], references: [id])
+  artwork     Artwork? @relation(fields: [artworkId], references: [id], onDelete: SetNull)
+  tracks      Track[]
+
+  @@index([albumArtistId])
+  @@index([createdAt])
+  @@index([year])
+}
+
+enum LoudnessSource {
+  TAG // ReplayGain tags in file
+  ANALYZED // ffmpeg ebur128
+}
+
+model Track {
+  id            String @id @default(cuid())
+  title         String
+  sortTitle     String
+  albumId       String
+  artistId      String // primary artist (first credited)
+  artistDisplay String // full credit string as tagged, e.g. "A feat. B"
+  trackNumber   Int?
+  discNumber    Int    @default(1)
+  year          Int?
+  durationMs    Int
+
+  // File identity
+  path         String    @unique // relative to MUSIC_DIR, POSIX separators
+  quickHash    String // SHA-256 over size + first/last 64 KiB; cheap move detection
+  fullHash     String? // full-file SHA-256, computed only when quick hashes collide
+  fileSize     BigInt
+  fileMtime    DateTime
+  missingSince DateTime? // soft-delete: file vanished; purged after grace period
+
+  // Format
+  container  String // "flac" | "mp3" | "mp4" | "ogg" | "wav" ...
+  codec      String // "flac" | "mp3" | "aac" | "alac" | "opus" | "vorbis" | "pcm_s16le"
+  bitrate    Int? // bps
+  sampleRate Int?
+  bitDepth   Int?
+  channels   Int?
+  lossless   Boolean
+
+  // Loudness / normalisation
+  replayGainDb   Float?
+  replayPeak     Float?
+  loudnessLufs   Float?
+  loudnessSource LoudnessSource?
+
+  // Optional audio features (Phase 9, Essentia if feasible)
+  bpm        Float?
+  musicalKey String?
+  energy     Float?
+
+  artworkId     String? // embedded art; API falls back to album art
+  hasLyricsFile Boolean  @default(false) // sidecar .lrc seen at scan
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  album          Album            @relation(fields: [albumId], references: [id])
+  artist         Artist           @relation("TrackPrimaryArtist", fields: [artistId], references: [id])
+  artwork        Artwork?         @relation(fields: [artworkId], references: [id], onDelete: SetNull)
+  credits        TrackArtist[]
+  genres         TrackGenre[]
+  lyrics         Lyrics?
+  transcodes     TranscodeCache[]
+  playlistTracks PlaylistTrack[]
+  likes          TrackLike[]
+  plays          PlayEvent[]
+
+  @@index([albumId, discNumber, trackNumber])
+  @@index([artistId])
+  @@index([createdAt])
+  @@index([missingSince])
+  @@index([quickHash])
+  @@index([fullHash])
+}
+
+/// All credited artists of a track (supports "feat." and multi-artist tags).
+model TrackArtist {
+  trackId  String
+  artistId String
+  role     String @default("main") // "main" | "featured"
+  position Int
+
+  track  Track  @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  artist Artist @relation(fields: [artistId], references: [id], onDelete: Cascade)
+
+  @@id([trackId, artistId])
+  @@index([artistId])
+}
+
+model Genre {
+  id     String       @id @default(cuid())
+  name   String
+  key    String       @unique // normalised
+  tracks TrackGenre[]
+}
+
+model TrackGenre {
+  trackId String
+  genreId String
+
+  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  genre Genre @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@id([trackId, genreId])
+  @@index([genreId])
+}
+
+enum ArtworkSource {
+  EMBEDDED
+  FOLDER // cover.jpg / folder.png next to audio
+  UPLOAD // user-uploaded playlist cover
+  MOSAIC // generated 2x2 playlist cover
+}
+
+/// Deduplicated by image hash. Files live at $DATA_DIR/art/<hash[0..2]>/<hash>_{64,300,640}.webp
+model Artwork {
+  id            String        @id @default(cuid())
+  hash          String        @unique
+  source        ArtworkSource
+  width         Int
+  height        Int
+  dominantColor String? // hex, for UI tinting
+  createdAt     DateTime      @default(now())
+
+  albums    Album[]
+  tracks    Track[]
+  artists   Artist[]
+  playlists Playlist[]
+}
+
+enum LyricsSource {
+  LRC_FILE
+  EMBEDDED
+  LRCLIB
+  NOT_FOUND // negative cache so we don't hammer LRCLIB
+}
+
+model Lyrics {
+  trackId   String       @id
+  source    LyricsSource
+  synced    Boolean
+  content   String? // raw LRC or plain text
+  language  String?
+  fetchedAt DateTime     @default(now())
+
+  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
+}
+
+/// Transcoded files on disk ($DATA_DIR/transcode/...). Used for LRU eviction under a size cap.
+model TranscodeCache {
+  id             String   @id @default(cuid())
+  trackId        String
+  profile        String // "opus96" | "opus160" | "opus320" | "aac256" | "flac"
+  path           String   @unique
+  sizeBytes      BigInt
+  createdAt      DateTime @default(now())
+  lastAccessedAt DateTime @default(now())
+
+  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@unique([trackId, profile])
+  @@index([lastAccessedAt])
+}
+
+enum ScanStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model ScanRun {
+  id         String     @id @default(cuid())
+  trigger    String // "startup" | "manual" | "watcher"
+  status     ScanStatus @default(RUNNING)
+  startedAt  DateTime   @default(now())
+  finishedAt DateTime?
+  filesSeen  Int        @default(0)
+  added      Int        @default(0)
+  updated    Int        @default(0)
+  moved      Int        @default(0)
+  removed    Int        @default(0)
+  errors     Json       @default("[]") // [{path, message}]
+}
+
+// ───────────────────────────── Playlists & likes ─────────────────────────────
+
+enum PlaylistKind {
+  NORMAL
+  SMART // tracks resolved from `rules` at read time
+  GENERATED // Daily Mix, On Repeat, etc. — rebuilt by the recs job
+}
+
+model Playlist {
+  id            String       @id @default(cuid())
+  ownerId       String
+  name          String
+  description   String?
+  kind          PlaylistKind @default(NORMAL)
+  rules         Json? // SMART: zod-validated rule tree; see PLAN.md
+  generatorKey  String? // GENERATED: e.g. "daily-mix:2", "on-repeat"
+  coverId       String? // UPLOAD or MOSAIC artwork
+  coverIsCustom Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  generatedAt   DateTime?
+
+  owner  User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  cover  Artwork?        @relation(fields: [coverId], references: [id], onDelete: SetNull)
+  tracks PlaylistTrack[]
+
+  @@unique([ownerId, generatorKey])
+  @@index([ownerId])
+}
+
+/// One row per entry (duplicates allowed). Ordered by a fractional-index string so
+/// a drag-reorder updates exactly one row.
+model PlaylistTrack {
+  id         String   @id @default(cuid())
+  playlistId String
+  trackId    String
+  sortKey    String
+  addedAt    DateTime @default(now())
+
+  playlist Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  track    Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@index([playlistId, sortKey])
+  @@index([trackId])
+}
+
+/// "Liked Songs" — exposed by the API as a virtual playlist with id "liked".
+model TrackLike {
+  userId  String
+  trackId String
+  likedAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@id([userId, trackId])
+  @@index([userId, likedAt])
+}
+
+// ───────────────────────────── Listening history ─────────────────────────────
+
+model PlayEvent {
+  id                 String   @id @default(cuid())
+  clientEventId      String   @unique // idempotency key: offline plays are re-sent safely
+  userId             String
+  trackId            String
+  deviceId           String?
+  listeningSessionId String // plays < 30 min apart share a session (co-listening signal)
+  startedAt          DateTime
+  msPlayed           Int
+  percentPlayed      Float // 0..1
+  skipped            Boolean
+  contextType        String? // "album" | "playlist" | "artist" | "radio" | "search" | "queue"
+  contextId          String?
+  playedOffline      Boolean  @default(false)
+  receivedAt         DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  track  Track   @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([userId, startedAt])
+  @@index([userId, trackId, startedAt])
+  @@index([listeningSessionId])
+}
+
+/// Materialised by a nightly job from PlayEvent sessions. trackAId < trackBId.
+model TrackCooccurrence {
+  userId    String
+  trackAId  String
+  trackBId  String
+  score     Float
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, trackAId, trackBId])
+  @@index([userId, trackAId, score])
+  @@index([userId, trackBId, score])
+}
+
+model RecentSearch {
+  id         String   @id @default(cuid())
+  userId     String
+  query      String?
+  entityType String? // set when the user clicked a result: "track" | "album" | "artist" | "playlist"
+  entityId   String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// ───────────────────────────── Devices & playback ─────────────────────────────
+
+enum DeviceType {
+  DESKTOP
+  PHONE
+  TABLET
+}
+
+model Device {
+  id         String     @id // client-generated UUID, persisted in localStorage
+  userId     String
+  name       String
+  type       DeviceType
+  userAgent  String?
+  lastSeenAt DateTime   @default(now())
+  createdAt  DateTime   @default(now())
+
+  user  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plays PlayEvent[]
+
+  @@index([userId])
+}
+
+enum RepeatMode {
+  OFF
+  ALL
+  ONE
+}
+
+/// Authoritative per-user player state (source for reload-restore and device transfer).
+/// Live position is interpolated: positionMs + (now - positionUpdatedAt) when isPlaying.
+model PlaybackState {
+  userId            String     @id
+  activeDeviceId    String?
+  currentTrackId    String?
+  positionMs        Int        @default(0)
+  positionUpdatedAt DateTime   @default(now())
+  isPlaying         Boolean    @default(false)
+  volume            Float      @default(1) // 0..1
+  shuffle           Boolean    @default(false)
+  repeat            RepeatMode @default(OFF)
+  queue             Json       @default("{}") // {context, items[], userQueue[], shuffleOrder[], index}
+  history           Json       @default("[]") // last ~100 played track ids
+  version           Int        @default(0) // optimistic concurrency for WS updates
+  updatedAt         DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
