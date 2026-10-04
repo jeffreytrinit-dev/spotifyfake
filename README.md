@@ -4,9 +4,11 @@ A self-hosted music streaming app for your own library: no ads, unlimited skips,
 high-quality audio, offline downloads, synced lyrics and cross-device playback, served from
 your own machine.
 
-> **Status: Phase 2 (streaming) is done.** There's no UI yet. The server scans your music
-> folder, exposes a JSON API and streams audio. See [`docs/PLAN.md`](docs/PLAN.md) for the
-> full plan, schema and API.
+> **Status: Phase 3 (the player) is done.** Tidepool has a web app you can install on your
+> phone's home screen, with a full player. Browsing is basic for now (recently added albums);
+> library pages, playlists and search come next. See [`docs/PLAN.md`](docs/PLAN.md) for the plan.
+>
+> **On an iPhone?** Follow [`docs/IPHONE.md`](docs/IPHONE.md), a step-by-step guide.
 
 ## What works now
 
@@ -27,6 +29,19 @@ your own machine.
   immediately on first play, are cached on disk (LRU, size-capped), and are served from the
   cache after that.
 - First-run admin setup, email + password login (argon2id), httpOnly cookie sessions.
+- **Web app (PWA)**, mobile-first, installable on the home screen, dark and light themes:
+  - Player bar on every screen and a full-screen Now Playing view. Play/pause, next/previous,
+    seek, volume, true shuffle (nothing repeats until everything has played), repeat off / all / one.
+  - Queue: _Play next_, _Add to queue_, drag to reorder (finger or keyboard), remove, clear,
+    recently played. Queue, track and position come back after a reload, or on another device.
+  - Lock screen / Control Center / headphone controls (Media Session).
+  - Desktop: near-gapless playback (two audio decks), crossfade 0–12 s (skipped between tracks
+    of the same album), 10-band equaliser with presets, volume levelling (ReplayGain). Loudness
+    is measured automatically for files without ReplayGain tags.
+  - iPhone: a single-player mode built to keep playing with the screen locked. Volume levelling
+    and EQ are opt-in there, because iOS may pause sound processing when locked.
+  - Picks the quality automatically when the connection is slow (from your chosen tier down).
+  - Keyboard shortcuts (press `?`).
 
 ## Run it with Docker
 
@@ -42,13 +57,8 @@ docker compose up -d --build
 docker compose logs -f server      # watch the first scan
 ```
 
-Then create your account (first run only):
-
-```bash
-curl -c cookies.txt -H 'content-type: application/json' \
-  -d '{"email":"you@example.com","displayName":"You","password":"a long password"}' \
-  http://localhost:3000/api/v1/auth/setup
-```
+Then open **<http://localhost:3000>**. The first time, it asks you to create your account.
+To use it on your iPhone, see [`docs/IPHONE.md`](docs/IPHONE.md).
 
 The music folder is mounted **read-only**. Tidepool never modifies your files.
 
@@ -66,7 +76,8 @@ pnpm install
 cp .env.example .env            # point DATABASE_URL / MEILI_* / MUSIC_DIR at your setup
 pnpm --filter @tidepool/server db:deploy
 pnpm --filter @tidepool/server fixtures ./music   # optional: small generated test library
-pnpm dev                        # server on http://localhost:3000 with reload
+pnpm dev                        # API on http://localhost:3000 (serves apps/web/dist if built)
+pnpm dev:web                    # web app with hot reload on http://localhost:5173 (proxies /api)
 ```
 
 Checks:
@@ -74,7 +85,11 @@ Checks:
 ```bash
 pnpm typecheck && pnpm lint && pnpm format:check
 pnpm test        # needs Postgres + Meilisearch + ffmpeg; uses a separate `tidepool_test` DB
+pnpm e2e         # browser tests (desktop + iPhone layouts); uses a `tidepool_e2e` DB
 ```
+
+Browser tests need Chromium: `pnpm --filter @tidepool/web exec playwright install chromium`
+(or point `PW_CHROMIUM_PATH` at an existing one).
 
 The tests create the `tidepool_test` database's tables themselves, but the database must
 exist and be owned by your DB user (`CREATE DATABASE tidepool_test OWNER tidepool;`). Override
@@ -85,19 +100,21 @@ with `TEST_DATABASE_URL`.
 All settings are environment variables; see [`.env.example`](.env.example) for the full,
 commented list. The important ones:
 
-| Variable                            | Default                 | Meaning                                                              |
-| ----------------------------------- | ----------------------- | -------------------------------------------------------------------- |
-| `MUSIC_HOST_DIR`                    | —                       | (Compose) host folder with your music, mounted read-only             |
-| `MUSIC_DIR` / `DATA_DIR`            | `/music` / `/data`      | Paths inside the server (art + caches live in `DATA_DIR`)            |
-| `DATABASE_URL`                      | —                       | PostgreSQL connection string                                         |
-| `MEILI_URL` / `MEILI_MASTER_KEY`    | —                       | Meilisearch                                                          |
-| `PUBLIC_URL`                        | `http://localhost:3000` | Origin the app is served from (`https://…` enables secure cookies)   |
-| `SCAN_ON_STARTUP` / `WATCH_LIBRARY` | `true` / `true`         | Full scan at boot / incremental rescans on change                    |
-| `WATCH_POLLING`                     | `false`                 | Poll instead of inotify (network shares, Docker on Windows)          |
-| `SCAN_CONCURRENCY`                  | `4`                     | Parallel file reads while scanning (use 2 on a Pi with a USB HDD)    |
-| `MISSING_GRACE_DAYS`                | `0`                     | Auto-purge missing tracks after N days. `0` = never (purge manually) |
-| `TRANSCODE_CACHE_MAX_GB`            | `10`                    | Disk space for transcoded audio                                      |
-| `TRANSCODE_CONCURRENCY`             | `2`                     | Simultaneous ffmpeg transcodes (2 for a Pi 5, 4 on a laptop)         |
+| Variable                            | Default                 | Meaning                                                                                                  |
+| ----------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| `MUSIC_HOST_DIR`                    | —                       | (Compose) host folder with your music, mounted read-only                                                 |
+| `MUSIC_DIR` / `DATA_DIR`            | `/music` / `/data`      | Paths inside the server (art + caches live in `DATA_DIR`)                                                |
+| `DATABASE_URL`                      | —                       | PostgreSQL connection string                                                                             |
+| `MEILI_URL` / `MEILI_MASTER_KEY`    | —                       | Meilisearch                                                                                              |
+| `PUBLIC_URL`                        | `http://localhost:3000` | Origin the app is served from (`https://…` forces Secure cookies; they're automatic behind HTTPS anyway) |
+| `SCAN_ON_STARTUP` / `WATCH_LIBRARY` | `true` / `true`         | Full scan at boot / incremental rescans on change                                                        |
+| `WATCH_POLLING`                     | `false`                 | Poll instead of inotify (network shares, Docker on Windows)                                              |
+| `SCAN_CONCURRENCY`                  | `4`                     | Parallel file reads while scanning (use 2 on a Pi with a USB HDD)                                        |
+| `MISSING_GRACE_DAYS`                | `0`                     | Auto-purge missing tracks after N days. `0` = never (purge manually)                                     |
+| `TRANSCODE_CACHE_MAX_GB`            | `10`                    | Disk space for transcoded audio                                                                          |
+| `TRANSCODE_CONCURRENCY`             | `2`                     | Simultaneous ffmpeg transcodes (2 for a Pi 5, 4 on a laptop)                                             |
+| `LOUDNESS_ANALYSIS`                 | `true`                  | Measure loudness of untagged tracks in the background                                                    |
+| `TIDEPOOL_LAN_IP`                   | —                       | Only for HTTPS on home Wi-Fi (`--profile lan-https`, docs/IPHONE.md)                                     |
 
 ## API quick reference
 
@@ -115,11 +132,15 @@ All under `/api/v1`. Writes made with the session cookie need an `X-Requested-Wi
 | `GET /stream/:trackId?q=high&formats=mp3,mp4-aac,webm-opus,flac`                                    | Audio. `q` = `low`/`normal`/`high`/`lossless` (default: your setting); `formats` = what the device can play; `wait=1` = wait for the transcode and serve it seekable |
 | `GET /stream/:trackId/original` · `GET /stream/:trackId/info` · `POST /stream/:trackId/prepare`     | Original file · what would be sent · pre-transcode (next track)                                                                                                      |
 | `GET /me/settings` · `PATCH /me/settings`                                                           | Quality, crossfade, EQ, theme…                                                                                                                                       |
+| `GET /me/player` · `PUT /me/player` · `POST /plays`                                                 | Saved queue/position (409 if another device saved meanwhile) · play history                                                                                          |
 
 ## Project layout
 
 ```
-apps/server        Fastify API, scanner, Prisma schema + migrations, tests
-packages/shared    zod schemas and types shared by server and (later) the web app
+apps/server        Fastify API, scanner, transcoder, Prisma schema + migrations, tests
+apps/web           React PWA: player engine (src/player), UI, Playwright tests (e2e/)
+packages/shared    zod schemas and types shared by server and web app
+deploy/            Caddy config for HTTPS on your home network
 docs/PLAN.md       Architecture, schema notes, full route list, phase plan
+docs/IPHONE.md     Getting Tidepool onto your iPhone's home screen
 ```

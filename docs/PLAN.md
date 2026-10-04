@@ -4,7 +4,7 @@ Self-hosted music streaming PWA for your own library. This document covers the
 **folder structure**, **database schema (Prisma)**, **API route list**, and the
 **WebSocket protocol**. Nothing is implemented yet; it's waiting on your review.
 
-Status: **Approved** with changes; see [§7 Decisions](#7-decisions-from-review). Phase 1 is implemented.
+Status: **Approved** with changes; see [§7 Decisions](#7-decisions-from-review). Phases 1–3 are implemented.
 
 ---
 
@@ -497,3 +497,28 @@ What the PWA has to get right (Phase 3):
   revisit Capacitor with a native audio plugin. The earlier notes on that route: it needs a
   Mac or macOS CI, a free Apple ID re-signs every 7 days, the audio features would be
   rebuilt natively, and auth would use a Bearer token.
+
+### Phase 3 as built
+
+- **Engines.** `apps/web/src/player/engine/`: the *dual* engine (desktop) uses two `<audio>`
+  decks through one Web Audio graph (ReplayGain gain → crossfade envelope → preamp → 10 biquad
+  filters → master). Near-gapless means the next deck starts on a timer about 40 ms before the
+  end. The *element* engine (iPhone/iPad) uses a single `<audio>`. The next URL is prepared ahead,
+  and on `ended` it is set and `play()`ed synchronously. Web Audio there is opt-in per device.
+- **Unlocking audio on iOS.** Taps that must fetch something before playing first play a tiny
+  silent clip on the same element, inside the tap, so the later `play()` is allowed.
+- **Queue.** Pure functions (`player/queue.ts`) over the same snapshot the server stores. The
+  user queue (`upNext`) survives starting a new album, as in other players.
+- **Saved state.** Saved to localStorage immediately and to `PUT /me/player` at most every few
+  seconds, with `version` for conflicts. A restored session isn't loaded into the audio element
+  until you press play, so nothing streams in the background.
+- **Plays.** Real listening time is counted (seeking doesn't count). Kept in a localStorage outbox
+  and sent to `POST /plays`, which is idempotent, so it already works for offline play in Phase 7.
+- **Loudness.** Tracks without ReplayGain tags are measured in the background (ffmpeg `ebur128`,
+  −18 LUFS reference). Album gain is the duration-weighted energy average of its tracks.
+- **One address.** The server serves the built web app too (with a CSP), so the phone needs a
+  single URL. HTTPS comes from Tailscale Serve, or from the optional Caddy profile on home Wi-Fi
+  (`deploy/Caddyfile.lan`). See [IPHONE.md](IPHONE.md).
+- **Not yet:** browsing beyond "recently added" (Phase 4), search (5), offline audio (7),
+  device handoff (8).
+
