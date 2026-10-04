@@ -317,12 +317,29 @@ The Capacitor iOS app will send the same session token as `Authorization: Bearer
 | GET/HEAD | `/stream/:trackId/original` | Original bytes, Range-capable (used for Lossless + downloads) | 2 |
 | GET | `/stream/:trackId/info` | Which file/profile `?q=` resolves to: codec, bitrate, size, `cached` | 2 |
 
-Transcode strategy: first request for an uncached (track, profile) transcodes the whole
-file to `tmp/`, then renames atomically into the cache (single-flight: concurrent requests
-wait on the same job). While that runs, the response is a chunked progressive stream
-**without** Range, so playback starts immediately. After caching, full Range support.
-A typical 4-minute track transcodes in about 1–2 s on a laptop and ~4–6 s on a Pi 5. The
-client also prefetches the next track's transcode via `HEAD`.
+| POST | `/stream/:trackId/prepare` | Start transcoding in the background (used for the next track in the queue). `202` if work started | 2 |
+
+Transcode strategy (implemented in Phase 2):
+
+- **Cached:** served from `DATA_DIR/transcode/<trackId>/<profile>.<ext>` with full Range support.
+  Each entry records the source's quick hash, so a re-encoded or retagged file invalidates it.
+- **Uncached, first request:** one ffmpeg run (the `tee` muxer) writes a seekable cache file
+  *and* a live stream. The live bytes are also kept in memory while the job runs, so every
+  listener starts from byte 0: a second device, or Safari's "probe 2 bytes, hang up,
+  re-request" pattern. The live response is `200` without `Content-Length` or Range
+  (like internet radio). Opus is WebM in both outputs; AAC is ADTS live and MP4 (`faststart`)
+  when cached; FLAC is FLAC in both.
+- **`?wait=1`** waits for the cache instead and then serves with Range. It's for seeking
+  inside a track that's still transcoding, and a fallback if a browser won't play a live stream.
+- **Single-flight + concurrency cap:** one job per (track, profile), with at most
+  `TRANSCODE_CONCURRENCY` running at once.
+- **Failures:** on an ffmpeg error the server sends the original if the client can play it
+  (`X-Tidepool-Fallback: original`), else `502 TRANSCODE_FAILED`. The (track, profile) then
+  backs off for 10 minutes.
+- **Eviction:** least recently used first, once the cache exceeds `TRANSCODE_CACHE_MAX_GB`.
+- **Speed (measured):** a 4-minute FLAC takes about 4–5.5 s to transcode fully on a 4-core
+  x86 VM (FLAC→FLAC about 1 s); expect slower on a Pi 5. Live streaming hides this for the
+  first play, and the player will call `/prepare` for the next track while the current one plays.
 
 ### Playlists & likes
 | Method | Path | Purpose | Phase |
@@ -440,8 +457,9 @@ serially and truncate tables. Meilisearch tests use a random per-app index prefi
 
 ## 7. Decisions from review
 
-1. **Quality tiers:** Low (Opus 96), Normal (Opus 160), High (Opus 320), Lossless. AAC 256 is
-   not a user-facing tier. It's picked automatically for clients that can't decode Opus.
+1. **Quality tiers:** Low (Opus 96), Normal (Opus 160), High (Opus 320), Lossless. AAC is
+   not a user-facing choice. It's picked automatically for clients that can't decode Opus,
+   at 96 / 160 / 256 kbps to match Low / Normal / High, so Low still saves data on an iPhone.
 2. **WAV under Lossless:** re-encoded to FLAC on the fly (lossless, about half the size) and cached.
 3. **Accounts:** a first-run setup screen creates the admin. No public sign-up; the admin adds users.
 4. **Never transcode up:** the original is served if it's at or below the target tier and the
@@ -455,26 +473,27 @@ serially and truncate tables. Meilisearch tests use a random per-app index prefi
 9. **Missing files:** a settings page lists them, with a manual purge. Auto-purge is off by default.
 10. **Fractional sort keys** get a rebalance routine (Phase 4).
 
-## 8. iOS app (Capacitor), planned for Phase 3
+## 8. iPhone: PWA first
 
-Locked-screen background playback isn't reliable for a home-screen PWA on iOS. So the iPhone
-client is the same React app wrapped in **Capacitor**, with a **native audio plugin** handling
-playback. What this implies (to confirm before Phase 3):
+Decision after review: no Mac and no paid Apple developer account, so the iPhone client is the
+**PWA added to the home screen**. Capacitor is the fallback if background playback proves unreliable.
 
-- **Building needs a Mac with Xcode**, or a hosted macOS CI runner such as GitHub Actions.
-  The Windows/Linux laptop can build the web layer but not the iOS app. With a free Apple ID,
-  an app installed on your own phone **expires after 7 days**. A paid Apple Developer account
-  ($99/year) gives 1-year signing and TestFlight.
-- **Two audio engines.** On iOS the native player does playback, so features built on Web
-  Audio (gapless, crossfade, 10-band EQ, ReplayGain) must be reimplemented natively for iOS
-  or reduced there. Plan: gapless and ReplayGain natively (AVQueuePlayer handles gapless;
-  ReplayGain is a volume multiplier), and EQ through `AVAudioUnitEQ` if the plugin is built on
-  AVAudioEngine. Crossfade is the hardest part on iOS and may be deferred. The browser keeps
-  the full Web Audio engine.
-- **Auth from the app:** the app's origin is `capacitor://localhost`, so cookies sent to the
-  server are cross-site. The app will send the session token as a Bearer header (same
-  `Session` table), and native audio requests will carry it as a header.
-- **Offline (Phase 7) on iOS** stores downloads in the app's file system through the native
-  layer instead of Cache Storage, so the native player can read them while the phone is locked.
-- **Lock screen / Control Center** metadata comes from the native plugin
-  (`MPNowPlayingInfoCenter`), which replaces the Media Session API on iOS.
+What the PWA has to get right (Phase 3):
+
+- Playback through a single `<audio>` element. Lock-screen and Control Center controls come
+  from the **Media Session API** (metadata, artwork, play/pause/next/previous/seek).
+- Playback must keep going when the screen locks or the user switches apps. iOS suspends
+  JavaScript timers in the background, so advancing to the next track has to happen from
+  the audio element's `ended` event, with the next track already prepared on the server.
+- iOS ignores `HTMLMediaElement.volume` (the hardware buttons control volume), so ReplayGain
+  normalisation and the EQ both need Web Audio (a GainNode and BiquadFilterNodes in front of
+  the `<audio>` element). iOS may suspend that processing when the screen locks. This has to
+  be tested on the device. The player will keep plain `<audio>` playback working regardless,
+  so the worst case is that normalisation and EQ only apply while the app is in the
+  foreground. Crossfade (optional) won't be attempted on iPhone.
+- Home-screen apps keep their own cookies, separate from Safari, so you sign in once inside
+  the installed app.
+- **If background playback is unreliable** (music stops at lock or on track change), we
+  revisit Capacitor with a native audio plugin. The earlier notes on that route: it needs a
+  Mac or macOS CI, a free Apple ID re-signs every 7 days, the audio features would be
+  rebuilt natively, and auth would use a Bearer token.

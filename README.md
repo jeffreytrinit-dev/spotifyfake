@@ -4,9 +4,9 @@ A self-hosted music streaming app for your own library: no ads, unlimited skips,
 high-quality audio, offline downloads, synced lyrics and cross-device playback, served from
 your own machine.
 
-> **Status: Phase 1 (library ingestion) is done.** There's no UI yet; the server scans your
-> music folder and exposes a JSON API. See [`docs/PLAN.md`](docs/PLAN.md) for the full plan,
-> schema and API.
+> **Status: Phase 2 (streaming) is done.** There's no UI yet. The server scans your music
+> folder, exposes a JSON API and streams audio. See [`docs/PLAN.md`](docs/PLAN.md) for the
+> full plan, schema and API.
 
 ## What works now
 
@@ -17,9 +17,15 @@ your own machine.
 - Album art from embedded pictures or `cover.jpg` / `folder.png`, deduplicated and stored as
   64 / 300 / 640 px WebP thumbnails.
 - Tracks are identified by content, so **moving or renaming files keeps their history**.
-  Files that disappear are marked *missing* (not deleted) until you purge them.
+  Files that disappear are marked _missing_ (not deleted) until you purge them.
 - Watches the folder and rescans incrementally when files change; manual rescan endpoint too.
 - Instant, typo-tolerant search index (Meilisearch).
+- **Streaming** with HTTP Range support, so seeking works (including on iPhone Safari).
+  Quality tiers are Low / Normal / High (Opus 96 / 160 / 320) and Lossless. The server
+  never transcodes up: a file already at or below the tier is sent as is. Devices that
+  can't play Opus get AAC automatically. WAV becomes FLAC at Lossless. Transcodes stream
+  immediately on first play, are cached on disk (LRU, size-capped), and are served from the
+  cache after that.
 - First-run admin setup, email + password login (argon2id), httpOnly cookie sessions.
 
 ## Run it with Docker
@@ -79,31 +85,36 @@ with `TEST_DATABASE_URL`.
 All settings are environment variables; see [`.env.example`](.env.example) for the full,
 commented list. The important ones:
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `MUSIC_HOST_DIR` | — | (Compose) host folder with your music, mounted read-only |
-| `MUSIC_DIR` / `DATA_DIR` | `/music` / `/data` | Paths inside the server (art + caches live in `DATA_DIR`) |
-| `DATABASE_URL` | — | PostgreSQL connection string |
-| `MEILI_URL` / `MEILI_MASTER_KEY` | — | Meilisearch |
-| `PUBLIC_URL` | `http://localhost:3000` | Origin the app is served from (`https://…` enables secure cookies) |
-| `SCAN_ON_STARTUP` / `WATCH_LIBRARY` | `true` / `true` | Full scan at boot / incremental rescans on change |
-| `WATCH_POLLING` | `false` | Poll instead of inotify (network shares, Docker on Windows) |
-| `SCAN_CONCURRENCY` | `4` | Parallel file reads while scanning (use 2 on a Pi with a USB HDD) |
-| `MISSING_GRACE_DAYS` | `0` | Auto-purge missing tracks after N days. `0` = never (purge manually) |
+| Variable                            | Default                 | Meaning                                                              |
+| ----------------------------------- | ----------------------- | -------------------------------------------------------------------- |
+| `MUSIC_HOST_DIR`                    | —                       | (Compose) host folder with your music, mounted read-only             |
+| `MUSIC_DIR` / `DATA_DIR`            | `/music` / `/data`      | Paths inside the server (art + caches live in `DATA_DIR`)            |
+| `DATABASE_URL`                      | —                       | PostgreSQL connection string                                         |
+| `MEILI_URL` / `MEILI_MASTER_KEY`    | —                       | Meilisearch                                                          |
+| `PUBLIC_URL`                        | `http://localhost:3000` | Origin the app is served from (`https://…` enables secure cookies)   |
+| `SCAN_ON_STARTUP` / `WATCH_LIBRARY` | `true` / `true`         | Full scan at boot / incremental rescans on change                    |
+| `WATCH_POLLING`                     | `false`                 | Poll instead of inotify (network shares, Docker on Windows)          |
+| `SCAN_CONCURRENCY`                  | `4`                     | Parallel file reads while scanning (use 2 on a Pi with a USB HDD)    |
+| `MISSING_GRACE_DAYS`                | `0`                     | Auto-purge missing tracks after N days. `0` = never (purge manually) |
+| `TRANSCODE_CACHE_MAX_GB`            | `10`                    | Disk space for transcoded audio                                      |
+| `TRANSCODE_CONCURRENCY`             | `2`                     | Simultaneous ffmpeg transcodes (2 for a Pi 5, 4 on a laptop)         |
 
-## API quick reference (Phase 1)
+## API quick reference
 
 All under `/api/v1`. Writes made with the session cookie need an `X-Requested-With` header
 (any value), which is a CSRF guard.
 
-| | |
-|---|---|
-| `GET /healthz` | DB / search / ffmpeg status |
-| `GET,POST /auth/setup` · `POST /auth/login` · `POST /auth/logout` · `GET /me` | Account |
-| `POST /library/scan` `{ "full": true }` · `GET /library/scan/:id` · `GET /library/scans` | Scanning (admin) |
-| `GET /library/stats` · `GET /library/missing` · `POST /library/missing/purge` `{ "trackIds"?: [] }` | Library maintenance |
-| `GET /artists` · `/artists/:id` · `/albums` · `/albums/:id` · `/tracks` · `/tracks/:id` · `/genres` | Browse (cursor pagination: `?cursor=&limit=`) |
-| `GET /art/:artworkId/:size` | `size` = `64`, `300`, `640` or `orig` (WebP) |
+|                                                                                                     |                                                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /healthz`                                                                                      | DB / search / ffmpeg status                                                                                                                                          |
+| `GET,POST /auth/setup` · `POST /auth/login` · `POST /auth/logout` · `GET /me`                       | Account                                                                                                                                                              |
+| `POST /library/scan` `{ "full": true }` · `GET /library/scan/:id` · `GET /library/scans`            | Scanning (admin)                                                                                                                                                     |
+| `GET /library/stats` · `GET /library/missing` · `POST /library/missing/purge` `{ "trackIds"?: [] }` | Library maintenance                                                                                                                                                  |
+| `GET /artists` · `/artists/:id` · `/albums` · `/albums/:id` · `/tracks` · `/tracks/:id` · `/genres` | Browse (cursor pagination: `?cursor=&limit=`)                                                                                                                        |
+| `GET /art/:artworkId/:size`                                                                         | `size` = `64`, `300`, `640` or `orig` (WebP)                                                                                                                         |
+| `GET /stream/:trackId?q=high&formats=mp3,mp4-aac,webm-opus,flac`                                    | Audio. `q` = `low`/`normal`/`high`/`lossless` (default: your setting); `formats` = what the device can play; `wait=1` = wait for the transcode and serve it seekable |
+| `GET /stream/:trackId/original` · `GET /stream/:trackId/info` · `POST /stream/:trackId/prepare`     | Original file · what would be sent · pre-transcode (next track)                                                                                                      |
+| `GET /me/settings` · `PATCH /me/settings`                                                           | Quality, crossfade, EQ, theme…                                                                                                                                       |
 
 ## Project layout
 
