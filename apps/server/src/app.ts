@@ -18,6 +18,9 @@ import { SearchIndexer } from './modules/library/indexer.js';
 import { libraryRoutes } from './modules/library/routes.js';
 import { LibraryService } from './modules/library/service.js';
 import { LibraryWatcher } from './modules/library/watcher.js';
+import { streamRoutes } from './modules/stream/routes.js';
+import { Transcoder } from './modules/stream/transcoder.js';
+import { userRoutes } from './modules/users/routes.js';
 import { configureIndexes, createSearch, type SearchIndexes } from './search/meili.js';
 
 export interface AppContext {
@@ -27,6 +30,7 @@ export interface AppContext {
   library: LibraryService;
   indexer: SearchIndexer;
   sessions: SessionStore;
+  transcoder: Transcoder;
   /** Run on close, before the DB disconnects (background work registers itself here). */
   onShutdown: (() => Promise<void>)[];
 }
@@ -58,7 +62,22 @@ export async function buildApp(env: Env, overrides: { db?: Db } = {}): Promise<F
     log: app.log.child({ module: 'library' }),
   });
   const sessions = new SessionStore(db, env.SESSION_TTL_DAYS);
-  const ctx: AppContext = { env, db, search, library, indexer, sessions, onShutdown: [] };
+  const transcoder = new Transcoder(db, env.DATA_DIR, app.log.child({ module: 'transcode' }), {
+    concurrency: env.TRANSCODE_CONCURRENCY,
+    maxBytes: env.TRANSCODE_CACHE_MAX_GB * 1024 ** 3,
+    timeoutMs: env.TRANSCODE_TIMEOUT_SEC * 1000,
+  });
+  await transcoder.init();
+  const ctx: AppContext = {
+    env,
+    db,
+    search,
+    library,
+    indexer,
+    sessions,
+    transcoder,
+    onShutdown: [],
+  };
   app.decorate('ctx', ctx);
 
   app.setErrorHandler((err, req, reply) => {
@@ -109,6 +128,8 @@ export async function buildApp(env: Env, overrides: { db?: Db } = {}): Promise<F
       await api.register(libraryRoutes, { library });
       await api.register(catalogRoutes, { db });
       await api.register(artworkRoutes, { db, dataDir: env.DATA_DIR });
+      await api.register(userRoutes, { db });
+      await api.register(streamRoutes, { db, transcoder, musicDir: env.MUSIC_DIR });
     },
     { prefix: '/api/v1' },
   );
@@ -116,6 +137,7 @@ export async function buildApp(env: Env, overrides: { db?: Db } = {}): Promise<F
   app.addHook('onClose', async () => {
     for (const task of ctx.onShutdown) await task();
     await library.idle();
+    await transcoder.idle();
     await db.$disconnect();
   });
   return app;
