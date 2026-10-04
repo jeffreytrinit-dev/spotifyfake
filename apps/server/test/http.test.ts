@@ -79,6 +79,25 @@ describe('auth', () => {
     expect((await get('/me', session)).statusCode).toBe(401);
   });
 
+  it('marks the cookie Secure when the request came in over HTTPS through a proxy', async () => {
+    const plain = await post(
+      '/auth/login',
+      { email: 'admin@example.com', password: 'a-long-password' },
+      '',
+    );
+    expect(plain.cookies.find((c) => c.name === 'tp_session')!.secure).toBeFalsy();
+    const viaTls = await post(
+      '/auth/login',
+      { email: 'admin@example.com', password: 'a-long-password' },
+      '',
+      {
+        ...W,
+        'x-forwarded-proto': 'https',
+      },
+    );
+    expect(viaTls.cookies.find((c) => c.name === 'tp_session')!.secure).toBe(true);
+  });
+
   it('stores only a hash of the session token', async () => {
     const token = admin.split('=')[1]!;
     const sessions = await t.app.ctx.db.session.findMany();

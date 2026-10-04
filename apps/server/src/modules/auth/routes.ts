@@ -1,5 +1,5 @@
 import type {} from '@fastify/cookie';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { LoginRequestSchema, SetupRequestSchema, type MeResponse } from '@tidepool/shared';
 import type { Db } from '../../db.js';
 import { isUniqueViolation } from '../../db.js';
@@ -14,13 +14,15 @@ export async function authRoutes(
   opts: { db: Db; sessions: SessionStore; secureCookies: boolean },
 ): Promise<void> {
   const { db, sessions } = opts;
-  const cookieOptions = {
+  // Secure when the request reached us over HTTPS (Tailscale/Caddy set X-Forwarded-Proto) or
+  // the configured public URL is HTTPS. Plain-HTTP LAN access still works, unflagged.
+  const cookieOptions = (req: FastifyRequest) => ({
     path: '/',
     httpOnly: true,
     sameSite: 'lax' as const,
-    secure: opts.secureCookies,
+    secure: opts.secureCookies || req.protocol === 'https',
     maxAge: Math.floor(sessions.ttlMs / 1000),
-  };
+  });
 
   app.get('/auth/setup', { config: { public: true } }, async () => {
     return { needsSetup: (await db.user.count()) === 0 };
@@ -61,7 +63,7 @@ export async function authRoutes(
         userAgent: req.headers['user-agent'],
         ip: req.ip,
       });
-      reply.setCookie(SESSION_COOKIE, token, cookieOptions).code(201);
+      reply.setCookie(SESSION_COOKIE, token, cookieOptions(req)).code(201);
       return toMe(user);
     },
   );
@@ -82,7 +84,7 @@ export async function authRoutes(
         userAgent: req.headers['user-agent'],
         ip: req.ip,
       });
-      reply.setCookie(SESSION_COOKIE, token, cookieOptions);
+      reply.setCookie(SESSION_COOKIE, token, cookieOptions(req));
       return toMe(user);
     },
   );
