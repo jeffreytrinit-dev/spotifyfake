@@ -53,6 +53,8 @@ describe('full scan', () => {
       include: { credits: { include: { artist: true }, orderBy: { position: 'asc' } } },
     });
     expect(mp3.albumId).toBe(flac.albumId);
+    // Same embedded cover in both files, processed concurrently: stored once, linked to both.
+    expect(mp3.artworkId).toBe(flac.artworkId);
     expect(mp3.credits.map((c) => [c.artist.name, c.role])).toEqual([
       ['Tagged Artist', 'main'],
       ['Guest One', 'featured'],

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -22,7 +23,7 @@ export function artworkFile(dataDir: string, hash: string, variant: ArtVariant):
 
 async function writeAtomic(file: string, data: Buffer): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${file}.${randomBytes(6).toString('hex')}.tmp`;
   await fs.writeFile(tmp, data);
   await fs.rename(tmp, file);
 }
@@ -32,7 +33,8 @@ async function writeAtomic(file: string, data: Buffer): Promise<void> {
  * hash → id cache so an album whose 15 tracks embed the same cover is decoded only once.
  */
 export class ArtworkStore {
-  private readonly idByHash = new Map<string, string | null>();
+  /** In-flight and finished ingests, so concurrent tracks sharing a cover decode it once. */
+  private readonly idByHash = new Map<string, Promise<string | null>>();
   private readonly folderArt = new Map<string, Promise<string | null>>();
 
   constructor(
@@ -49,15 +51,15 @@ export class ArtworkStore {
 
   async ingest(data: Uint8Array, source: ArtworkSource): Promise<string | null> {
     const hash = sha256(data);
-    const cached = this.idByHash.get(hash);
-    if (cached !== undefined) return cached;
-
-    const id = await this.ingestUncached(Buffer.from(data), hash, source).catch((err: unknown) => {
-      this.log.warn({ err, hash }, 'artwork: failed to process image');
-      return null;
-    });
-    this.idByHash.set(hash, id);
-    return id;
+    let pending = this.idByHash.get(hash);
+    if (!pending) {
+      pending = this.ingestUncached(Buffer.from(data), hash, source).catch((err: unknown) => {
+        this.log.warn({ err, hash }, 'artwork: failed to process image');
+        return null;
+      });
+      this.idByHash.set(hash, pending);
+    }
+    return pending;
   }
 
   private async ingestUncached(buf: Buffer, hash: string, source: ArtworkSource): Promise<string> {
