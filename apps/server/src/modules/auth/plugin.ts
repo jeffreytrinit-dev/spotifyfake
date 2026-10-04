@@ -44,7 +44,9 @@ export const authPlugin = fp(
         throw forbidden('Missing X-Requested-With header');
       }
 
-      if (!req.routeOptions.config.public && !req.user) throw unauthorized();
+      // Only the API needs a session; the web app's static files must load before sign-in.
+      const isApi = req.url.startsWith('/api/');
+      if (isApi && !req.routeOptions.config.public && !req.user) throw unauthorized();
     });
   },
   { name: 'auth', dependencies: ['@fastify/cookie'] },

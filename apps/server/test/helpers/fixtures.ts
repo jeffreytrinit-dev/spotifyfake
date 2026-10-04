@@ -30,10 +30,19 @@ function meta(tags: Record<string, string | number>): string[] {
   return Object.entries(tags).flatMap(([k, v]) => ['-metadata', `${k}=${v}`]);
 }
 
-/** Generated once per process and copied per test, since ffmpeg is the slow part. */
-let template: Promise<FixtureLibrary> | null = null;
+export interface FixtureOptions {
+  /**
+   * Longer tracks for browser tests (30 s, except "First Song" at 4 s so auto-advance is quick).
+   * Default: 2–3 s tracks, which keeps server tests fast.
+   */
+  long?: boolean;
+}
 
-async function buildTemplate(): Promise<FixtureLibrary> {
+/** Generated once per process and copied per test, since ffmpeg is the slow part. */
+const templates = new Map<boolean, Promise<FixtureLibrary>>();
+
+async function buildTemplate({ long = false }: FixtureOptions): Promise<FixtureLibrary> {
+  const len = (short: number) => (long ? 30 : short);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tidepool-fixture-'));
   const art = path.join(root, '.art');
   await fs.mkdir(art);
@@ -55,7 +64,7 @@ async function buildTemplate(): Promise<FixtureLibrary> {
 
   await Promise.all([
     ffmpeg([
-      ...sine(440, 3),
+      ...sine(440, long ? 4 : 3),
       '-i',
       red,
       '-map',
@@ -80,7 +89,7 @@ async function buildTemplate(): Promise<FixtureLibrary> {
       abs('flac'),
     ]),
     ffmpeg([
-      ...sine(550),
+      ...sine(550, len(2)),
       '-i',
       red,
       '-map',
@@ -107,7 +116,7 @@ async function buildTemplate(): Promise<FixtureLibrary> {
       abs('mp3'),
     ]),
     ffmpeg([
-      ...sine(660),
+      ...sine(660, len(2)),
       '-c:a',
       'pcm_s16le',
       '-fflags',
@@ -116,9 +125,18 @@ async function buildTemplate(): Promise<FixtureLibrary> {
       '-1',
       abs('wav'),
     ]),
-    ffmpeg([...sine(770), '-c:a', 'libopus', '-b:a', '64k', '-map_metadata', '-1', abs('opus')]),
     ffmpeg([
-      ...sine(880),
+      ...sine(770, len(2)),
+      '-c:a',
+      'libopus',
+      '-b:a',
+      '64k',
+      '-map_metadata',
+      '-1',
+      abs('opus'),
+    ]),
+    ffmpeg([
+      ...sine(880, len(2)),
       '-c:a',
       'aac',
       '-b:a',
@@ -141,17 +159,18 @@ async function buildTemplate(): Promise<FixtureLibrary> {
 }
 
 /** A fresh copy of the fixture library in its own temp dir. */
-export async function createFixtureLibrary(): Promise<FixtureLibrary> {
-  template ??= buildTemplate();
-  const t = await template;
+export async function createFixtureLibrary(opts: FixtureOptions = {}): Promise<FixtureLibrary> {
+  const key = opts.long ?? false;
+  if (!templates.has(key)) templates.set(key, buildTemplate(opts));
+  const t = await templates.get(key)!;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tidepool-lib-'));
   await fs.cp(t.root, root, { recursive: true });
   return { root, files: t.files };
 }
 
 /** Write the fixture library to a fixed directory (used by `pnpm fixtures` for manual testing). */
-export async function writeFixtureLibrary(dest: string): Promise<void> {
-  const lib = await createFixtureLibrary();
+export async function writeFixtureLibrary(dest: string, opts: FixtureOptions = {}): Promise<void> {
+  const lib = await createFixtureLibrary(opts);
   await fs.mkdir(dest, { recursive: true });
   await fs.cp(lib.root, dest, { recursive: true });
   await fs.rm(lib.root, { recursive: true });

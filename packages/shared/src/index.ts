@@ -5,3 +5,4 @@ export * from './api/catalog.js';
 export * from './stream.js';
 export * from './api/settings.js';
 export * from './api/stream.js';
+export * from './api/player.js';

@@ -40,6 +40,14 @@ const EnvSchema = z.object({
   TRANSCODE_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
   TRANSCODE_TIMEOUT_SEC: z.coerce.number().int().min(10).default(600),
 
+  /** Measure loudness (ffmpeg ebur128) for tracks without ReplayGain tags, in the background. */
+  LOUDNESS_ANALYSIS: bool.default(true),
+  /** Built web app to serve (apps/web/dist). Missing → API only. */
+  WEB_DIR: z
+    .string()
+    .default('../web/dist')
+    .transform((p) => path.resolve(p)),
+
   SESSION_TTL_DAYS: z.coerce.number().int().min(1).default(30),
 });
 

@@ -55,6 +55,8 @@ export class LibraryService {
       artwork: ArtworkStore;
       indexer: SearchIndexer;
       log: FastifyBaseLogger;
+      /** Called after each successful scan (e.g. to analyse loudness of new tracks). */
+      onScanComplete?: () => void;
     },
   ) {}
 
@@ -164,6 +166,7 @@ export class LibraryService {
         scanner.counters.errors.push({ path: '(search index)', message: (err as Error).message });
       }
       await this.persist(runId, scanner.counters, 'COMPLETED');
+      this.deps.onScanComplete?.();
     } catch (err) {
       log.error({ err }, 'scan: failed');
       scanner.counters.errors.push({ path: '(scan)', message: (err as Error).message });

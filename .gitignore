@@ -6,3 +6,6 @@ coverage/
 apps/server/src/generated/
 data/
 .tmp/
+test-results/
+playwright-report/
+dev-dist/

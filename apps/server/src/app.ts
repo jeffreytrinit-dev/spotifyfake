@@ -18,7 +18,11 @@ import { SearchIndexer } from './modules/library/indexer.js';
 import { libraryRoutes } from './modules/library/routes.js';
 import { LibraryService } from './modules/library/service.js';
 import { LibraryWatcher } from './modules/library/watcher.js';
+import { LoudnessAnalyzer } from './modules/library/loudness.js';
+import { playerRoutes } from './modules/player/routes.js';
+import { playRoutes } from './modules/plays/routes.js';
 import { streamRoutes } from './modules/stream/routes.js';
+import { registerWebApp } from './modules/web/static.js';
 import { Transcoder } from './modules/stream/transcoder.js';
 import { userRoutes } from './modules/users/routes.js';
 import { configureIndexes, createSearch, type SearchIndexes } from './search/meili.js';
@@ -31,6 +35,7 @@ export interface AppContext {
   indexer: SearchIndexer;
   sessions: SessionStore;
   transcoder: Transcoder;
+  loudness: LoudnessAnalyzer;
   /** Run on close, before the DB disconnects (background work registers itself here). */
   onShutdown: (() => Promise<void>)[];
 }
@@ -54,12 +59,14 @@ export async function buildApp(env: Env, overrides: { db?: Db } = {}): Promise<F
   const search = createSearch(env.MEILI_URL, env.MEILI_MASTER_KEY, env.MEILI_INDEX_PREFIX);
   const artwork = new ArtworkStore(db, env.DATA_DIR, app.log.child({ module: 'artwork' }));
   const indexer = new SearchIndexer(db, search, app.log.child({ module: 'search' }));
+  const loudness = new LoudnessAnalyzer(db, env.MUSIC_DIR, app.log.child({ module: 'loudness' }));
   const library = new LibraryService({
     db,
     env,
     artwork,
     indexer,
     log: app.log.child({ module: 'library' }),
+    ...(env.LOUDNESS_ANALYSIS ? { onScanComplete: () => void loudness.kick() } : {}),
   });
   const sessions = new SessionStore(db, env.SESSION_TTL_DAYS);
   const transcoder = new Transcoder(db, env.DATA_DIR, app.log.child({ module: 'transcode' }), {
@@ -76,6 +83,7 @@ export async function buildApp(env: Env, overrides: { db?: Db } = {}): Promise<F
     indexer,
     sessions,
     transcoder,
+    loudness,
     onShutdown: [],
   };
   app.decorate('ctx', ctx);
@@ -130,12 +138,17 @@ export async function buildApp(env: Env, overrides: { db?: Db } = {}): Promise<F
       await api.register(artworkRoutes, { db, dataDir: env.DATA_DIR });
       await api.register(userRoutes, { db });
       await api.register(streamRoutes, { db, transcoder, musicDir: env.MUSIC_DIR });
+      await api.register(playerRoutes, { db });
+      await api.register(playRoutes, { db });
     },
     { prefix: '/api/v1' },
   );
 
+  await registerWebApp(app, env.WEB_DIR);
+
   app.addHook('onClose', async () => {
     for (const task of ctx.onShutdown) await task();
+    await loudness.stop();
     await library.idle();
     await transcoder.idle();
     await db.$disconnect();
@@ -174,6 +187,7 @@ export async function startBackground(app: FastifyInstance): Promise<void> {
     return;
   }
   if (env.SCAN_ON_STARTUP) await library.startFullScan('startup');
+  else if (env.LOUDNESS_ANALYSIS) void app.ctx.loudness.kick();
   if (env.WATCH_LIBRARY) {
     const watcher = new LibraryWatcher(env.MUSIC_DIR, library, log.child({ module: 'watcher' }), {
       polling: env.WATCH_POLLING,

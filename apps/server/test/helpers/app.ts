@@ -60,6 +60,8 @@ export async function createTestApp(
     SCAN_ON_STARTUP: 'false',
     WATCH_LIBRARY: 'false',
     SCAN_CONCURRENCY: '2',
+    LOUDNESS_ANALYSIS: 'false',
+    WEB_DIR: path.join(dataDir, 'no-web'),
     ...overrides,
   });
   const app = await buildApp(env);
